@@ -1,0 +1,98 @@
+stage_1:
+  target: stage1.VQRAE
+  params:
+    # Encoder configuration - SigLIP-L (400M parameters)
+    encoder_cls: 'SigLIP2wNorm'
+    encoder_config_path: 'google/siglip-large-patch16-384'  # SigLIP-L
+    encoder_input_size: 224  # Training resolution
+    encoder_params: 
+      model_name: 'google/siglip-large-patch16-384'
+      num_tokens: 196  # 14x14 patches for 224x224 input
+    
+    # Decoder configuration - Symmetric ViT (mirrors encoder)
+    decoder_config_path: 'configs/decoder/ViTL_symmetric'  # Same depth as SigLIP-L (24 layers)
+    decoder_patch_size: 16
+    
+    # Vector Quantization parameters (SimVQ)
+    num_embeddings: 16384  # 16k codebook size (100% utilization)
+    commitment_cost: 0.25  # Standard commitment weight
+    vq_decay: 0.99  # EMA decay (if using EMA updates)
+    vq_epsilon: 1e-5
+    quantize_before_reshape: false  # Quantize in 2D format
+    use_simvq: true  # Use SimVQ instead of standard VQ
+    
+    # Codebook dimension matches encoder output (1536 for SigLIP-L)
+    # This is automatically set based on encoder.hidden_size
+    
+    # RAE parameters
+    noise_tau: 0.0  # No noise injection for VQRAE
+    reshape_to_2d: true
+    normalization_stat_path: null  # Computed during training
+
+# Training configuration for Stage-1 (Frozen Encoder)
+training:
+  stage: 1
+  global_seed: 42
+  
+  # Dataset
+  dataset: 'datacomp1b'  # DataComp-1B (1.1B images)
+  num_epochs: 30
+  
+  # Batch configuration
+  batch_size: 512  # Per-GPU batch size
+  # Global batch size = 512 * 8 GPUs = 4096 (as specified in paper)
+  num_workers: 8
+  gradient_accumulation_steps: 1
+  
+  # Optimizer settings (Stage-1)
+  learning_rate: 1.0e-3  # 1e-3 for codebook & decoder
+  optimizer: 'AdamW'
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+  
+  # Learning rate schedule
+  lr_warmup_steps: 5000
+  lr_schedule: 'cosine'
+  min_lr_ratio: 0.1
+  
+  # Loss weights (Stage-1)
+  recon_weight: 1.0  # L2 reconstruction loss
+  lpips_weight: 1.0  # Perceptual loss (LPIPS)
+  gan_weight: 0.8  # GAN loss
+  vq_weight: 1.0  # VQ loss
+  
+  # EMA settings
+  use_ema: true
+  ema_decay: 0.9999
+  
+  # Checkpointing
+  ckpt_every: 5000
+  log_every: 100
+  sample_every: 2500
+  
+  # Precision
+  precision: 'bf16'  # BFloat16 for efficiency
+  
+# GAN discriminator configuration (Patch-based)
+gan:
+  target: disc.dinodisc.DinoDisc
+  params:
+    encoder_cls: 'Dinov2'
+    encoder_path: 'facebook/dinov2-base'
+    input_size: 224
+    freeze_encoder: true
+    patch_based: true  # Patch-based discriminator as per paper
+  
+  # Loss schedule
+  disc_start: 10000  # Start discriminator after 10k steps
+  disc_weight: 0.8
+  gen_kind: 'vanilla'
+  disc_kind: 'hinge'
+  lpips_weight: 1.0
+  recon_weight: 1.0
+  vq_weight: 1.0
+
+# LPIPS perceptual loss
+lpips:
+  network: 'vgg'  # VGG-based LPIPS
+  lpips_start: 0  # Use LPIPS from the beginning

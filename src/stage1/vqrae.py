@@ -10,6 +10,7 @@ The quantized latents can be used for improved controllability and interpretabil
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .rae import RAE
 from .vector_quantizer import VectorQuantizer
 from typing import Optional, Tuple, Dict, Union
@@ -36,23 +37,25 @@ class VQRAE(RAE):
     def __init__(
         self,
         # Vector quantization specific parameters
-        num_embeddings: int = 8192,
+        num_embeddings: int = 16384,  # Paper uses 16k for 100% utilization
         commitment_cost: float = 0.25,
         vq_decay: float = 0.99,
         vq_epsilon: float = 1e-5,
         quantize_before_reshape: bool = False,
+        use_simvq: bool = True,  # NEW: Use SimVQ by default (paper approach)
         # RAE parameters (passed to parent)
-        encoder_cls: str = 'Dinov2withNorm',
-        encoder_config_path: str = 'facebook/dinov2-base',
+        encoder_cls: str = 'SigLIP2wNorm',  # Paper uses SigLIP-L
+        encoder_config_path: str = 'google/siglip-large-patch16-384',
         encoder_input_size: int = 224,
         encoder_params: dict = {},
         decoder_config_path: str = 'vit_mae-base',
         decoder_patch_size: int = 16,
         pretrained_decoder_path: Optional[str] = None,
-        noise_tau: float = 0.8,
+        noise_tau: float = 0.0,  # Paper doesn't use noise
         reshape_to_2d: bool = True,
         normalization_stat_path: Optional[str] = None,
         eps: float = 1e-5,
+        freeze_encoder: bool = True,  # NEW: Support for Stage-2 unfreezing
     ):
         # Initialize parent RAE
         super().__init__(
@@ -69,19 +72,46 @@ class VQRAE(RAE):
             eps=eps,
         )
         
-        # Initialize vector quantizer
+        # Initialize vector quantizer (SimVQ or standard VQ)
         self.num_embeddings = num_embeddings
         self.quantize_before_reshape = quantize_before_reshape
-        self.quantizer = VectorQuantizer(
-            num_embeddings=num_embeddings,
-            embedding_dim=self.latent_dim,
-            commitment_cost=commitment_cost,
-            decay=vq_decay,
-            epsilon=vq_epsilon,
-        )
+        self.use_simvq = use_simvq
+        self.freeze_encoder = freeze_encoder
         
-        # Store last VQ loss for monitoring (optional)
+        if use_simvq:
+            from .simvq import SimVQ
+            self.quantizer = SimVQ(
+                num_embeddings=num_embeddings,
+                embedding_dim=self.latent_dim,
+                commitment_cost=commitment_cost,
+                use_projection=True,  # Key feature of SimVQ
+                epsilon=vq_epsilon,
+            )
+            print(f"Initialized VQRAE with SimVQ (codebook size: {num_embeddings}, dim: {self.latent_dim})")
+        else:
+            from .vector_quantizer import VectorQuantizer
+            self.quantizer = VectorQuantizer(
+                num_embeddings=num_embeddings,
+                embedding_dim=self.latent_dim,
+                commitment_cost=commitment_cost,
+                decay=vq_decay,
+                epsilon=vq_epsilon,
+            )
+            print(f"Initialized VQRAE with standard VQ (codebook size: {num_embeddings})")
+        
+        # Freeze/unfreeze encoder based on training stage
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            print("Encoder frozen (Stage-1 mode)")
+        else:
+            for param in self.encoder.parameters():
+                param.requires_grad = True
+            print("Encoder unfrozen (Stage-2 mode)")
+        
+        # Store last VQ loss for monitoring
         self.last_vq_loss = None
+        self.last_continuous_features = None  # For Stage-2 distillation
         
         print(f"Initialized VQRAE with codebook size {num_embeddings}")
     
@@ -178,6 +208,9 @@ class VQRAE(RAE):
                 (x_rec, losses): Reconstructed image and dictionary of losses
             If return_indices=True:
                 (x_rec, indices): Reconstructed image and codebook indices
+        
+        Note:
+            If both return_loss and return_indices are True, return_loss takes precedence.
         """
         # Get continuous latent from encoder (before quantization)
         _, _, h, w = x.shape
@@ -202,11 +235,13 @@ class VQRAE(RAE):
             if self.reshape_to_2d:
                 b, n, c = z_q.shape
                 h_lat = w_lat = int(n ** 0.5)
+                assert h_lat * w_lat == n, f"Number of patches {n} must be a perfect square for 2D reshaping"
                 z_q = z_q.transpose(1, 2).view(b, c, h_lat, w_lat)
         else:
             if self.reshape_to_2d:
                 b, n, c = z.shape
                 h_lat = w_lat = int(n ** 0.5)
+                assert h_lat * w_lat == n, f"Number of patches {n} must be a perfect square for 2D reshaping"
                 z = z.transpose(1, 2).view(b, c, h_lat, w_lat)
             z_q, vq_loss, indices = self.quantizer(z)
         
@@ -283,3 +318,52 @@ class VQRAE(RAE):
         
         # Decode
         return self.decode(z_q)
+    
+    def compute_distillation_loss(self, continuous_features: torch.Tensor, quantized_features: torch.Tensor) -> torch.Tensor:
+        """
+        Compute self-distillation loss for Stage-2 training.
+        
+        This loss encourages the quantized features to match the continuous features,
+        preserving the semantic understanding from the frozen encoder (Stage-1).
+        
+        Args:
+            continuous_features: Continuous latent features from encoder (before quantization)
+            quantized_features: Quantized latent features (after VQ)
+        
+        Returns:
+            distillation_loss: L2 loss between continuous and quantized features
+        """
+        return F.mse_loss(quantized_features, continuous_features.detach())
+    
+    def set_stage(self, stage: int):
+        """
+        Set training stage (1 or 2) and adjust encoder freezing accordingly.
+        
+        Args:
+            stage: Training stage (1 = frozen encoder, 2 = unfrozen encoder)
+        """
+        if stage == 1:
+            # Stage-1: Freeze encoder
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            self.freeze_encoder = True
+            print("Switched to Stage-1 mode (encoder frozen)")
+        elif stage == 2:
+            # Stage-2: Unfreeze encoder
+            for param in self.encoder.parameters():
+                param.requires_grad = True
+            self.freeze_encoder = False
+            print("Switched to Stage-2 mode (encoder unfrozen)")
+        else:
+            raise ValueError(f"Invalid stage: {stage}. Must be 1 or 2.")
+    
+    def get_codebook_usage(self) -> float:
+        """
+        Get codebook utilization rate.
+        
+        Returns:
+            usage: Percentage of codebook entries being used (0.0 to 1.0)
+        """
+        if hasattr(self.quantizer, 'get_codebook_usage'):
+            return self.quantizer.get_codebook_usage()
+        return 0.0
