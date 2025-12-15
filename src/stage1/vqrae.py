@@ -80,6 +80,9 @@ class VQRAE(RAE):
             epsilon=vq_epsilon,
         )
         
+        # Store last VQ loss for monitoring (optional)
+        self.last_vq_loss = None
+        
         print(f"Initialized VQRAE with codebook size {num_embeddings}")
     
     def encode(self, x: torch.Tensor, return_indices: bool = False) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
@@ -111,7 +114,7 @@ class VQRAE(RAE):
         # Quantize before or after reshaping based on configuration
         if self.quantize_before_reshape:
             # Quantize in (B, N, C) format
-            z_q, _, indices = self.quantizer(z)
+            z_q, vq_loss, indices = self.quantizer(z)
             
             # Then reshape to 2D if needed
             if self.reshape_to_2d:
@@ -126,7 +129,10 @@ class VQRAE(RAE):
                 z = z.transpose(1, 2).view(b, c, h, w)
             
             # Then quantize in (B, C, H, W) format
-            z_q, _, indices = self.quantizer(z)
+            z_q, vq_loss, indices = self.quantizer(z)
+        
+        # Store VQ loss for monitoring
+        self.last_vq_loss = vq_loss.detach() if vq_loss is not None else None
         
         # Apply normalization if enabled
         if self.do_normalization:
