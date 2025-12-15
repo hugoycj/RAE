@@ -42,7 +42,7 @@ class VQRAE(RAE):
         vq_decay: float = 0.99,
         vq_epsilon: float = 1e-5,
         quantize_before_reshape: bool = False,
-        use_simvq: bool = True,  # NEW: Use SimVQ by default (paper approach)
+        use_simvq: bool = False,  # Use SimVQ (set True for paper-compliant implementation)
         # RAE parameters (passed to parent)
         encoder_cls: str = 'SigLIP2wNorm',  # Paper uses SigLIP-L
         encoder_config_path: str = 'google/siglip-large-patch16-384',

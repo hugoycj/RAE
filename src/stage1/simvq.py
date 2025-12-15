@@ -50,8 +50,8 @@ class SimVQ(nn.Module):
         self.projection_dim = projection_dim or embedding_dim
         self.epsilon = epsilon
         
-        # Initialize codebook
-        self.register_buffer('embedding', torch.randn(num_embeddings, embedding_dim))
+        # Initialize codebook with uniform distribution
+        self.register_buffer('embedding', torch.empty(num_embeddings, embedding_dim))
         self.embedding.data.uniform_(-1.0 / num_embeddings, 1.0 / num_embeddings)
         
         # Learnable projection matrices (key component of SimVQ)

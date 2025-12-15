@@ -46,7 +46,7 @@ class VectorQuantizer(nn.Module):
         self.decay = decay
         self.epsilon = epsilon
         
-        # Initialize codebook with uniform distribution
+        # Initialize codebook with normal distribution
         self.register_buffer('embedding', torch.randn(num_embeddings, embedding_dim))
         self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
         self.register_buffer('ema_w', self.embedding.clone())
