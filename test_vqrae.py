@@ -6,7 +6,12 @@ This script tests the basic functionality without requiring full model weights.
 
 import torch
 import sys
-sys.path.insert(0, '/home/runner/work/RAE/RAE/src')
+import os
+
+# Add src directory to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.join(script_dir, 'src')
+sys.path.insert(0, src_dir)
 
 from stage1 import VQRAE
 

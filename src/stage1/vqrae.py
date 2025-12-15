@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from .rae import RAE
 from .vector_quantizer import VectorQuantizer
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Union
 
 
 class VQRAE(RAE):
@@ -85,7 +85,7 @@ class VQRAE(RAE):
         
         print(f"Initialized VQRAE with codebook size {num_embeddings}")
     
-    def encode(self, x: torch.Tensor, return_indices: bool = False) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, x: torch.Tensor, return_indices: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Encode input to quantized latent representation.
         
@@ -162,7 +162,7 @@ class VQRAE(RAE):
         x: torch.Tensor,
         return_loss: bool = False,
         return_indices: bool = False
-    ) -> torch.Tensor | Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
         Forward pass through VQRAE.
         
