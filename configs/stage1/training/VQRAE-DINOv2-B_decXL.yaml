@@ -17,6 +17,8 @@ stage_1:
     vq_decay: 0.99  # EMA decay for codebook updates
     vq_epsilon: 1e-5
     quantize_before_reshape: false
+    use_simvq: false  # Use standard VQ (set true for SimVQ)
+    freeze_encoder: true  # Freeze encoder during training
     
     # Training parameters
     noise_tau: 0.  # Disable noise for VQ training

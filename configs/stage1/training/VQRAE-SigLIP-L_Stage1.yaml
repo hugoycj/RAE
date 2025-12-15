@@ -20,6 +20,7 @@ stage_1:
     vq_epsilon: 1e-5
     quantize_before_reshape: false  # Quantize in 2D format
     use_simvq: true  # Use SimVQ instead of standard VQ
+    freeze_encoder: true  # Stage-1: Freeze encoder
     
     # Codebook dimension matches encoder output (1536 for SigLIP-L)
     # This is automatically set based on encoder.hidden_size

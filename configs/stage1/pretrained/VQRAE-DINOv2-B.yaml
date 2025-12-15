@@ -17,6 +17,8 @@ stage_1:
     vq_decay: 0.99  # EMA decay for codebook updates
     vq_epsilon: 1e-5  # Numerical stability constant
     quantize_before_reshape: false  # Quantize after reshaping to 2D
+    use_simvq: false  # Use standard VQ (set true for SimVQ)
+    freeze_encoder: true  # Freeze encoder during inference
     
     # RAE parameters
     noise_tau: 0.  # No noise for VQ (can be enabled if desired)
