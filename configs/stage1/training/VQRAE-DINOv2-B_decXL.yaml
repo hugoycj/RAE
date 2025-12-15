@@ -1,0 +1,67 @@
+stage_1:
+  target: stage1.VQRAE
+  params:
+    # Encoder configuration
+    encoder_cls: 'Dinov2withNorm'
+    encoder_config_path: 'facebook/dinov2-with-registers-base'
+    encoder_input_size: 224
+    encoder_params: {'dinov2_path': 'facebook/dinov2-with-registers-base', 'normalize': True}
+    
+    # Decoder configuration
+    decoder_config_path: 'configs/decoder/ViTXL'
+    decoder_patch_size: 16
+    
+    # Vector Quantization parameters
+    num_embeddings: 8192  # Codebook size - can be tuned (common values: 512, 1024, 8192, 16384)
+    commitment_cost: 0.25  # Weight for commitment loss
+    vq_decay: 0.99  # EMA decay for codebook updates
+    vq_epsilon: 1e-5
+    quantize_before_reshape: false
+    
+    # Training parameters
+    noise_tau: 0.  # Disable noise for VQ training
+    reshape_to_2d: true
+    normalization_stat_path: null  # Will be computed during training
+
+# GAN discriminator configuration (same as standard RAE training)
+gan:
+  target: disc.dinodisc.DinoDisc
+  params:
+    encoder_cls: 'Dinov2'
+    encoder_path: 'facebook/dinov2-with-registers-base'
+    input_size: 256
+    freeze_encoder: true
+  
+  # Loss schedule
+  disc_start: 10000  # Start discriminator after this many steps
+  disc_weight: 0.8
+  gen_kind: vanilla
+  disc_kind: hinge
+  lpips_weight: 1.0
+  recon_weight: 1.0
+  vq_weight: 1.0  # Weight for VQ loss
+
+# Training configuration
+training:
+  global_seed: 42
+  num_epochs: 100
+  batch_size: 64
+  num_workers: 8
+  
+  # Optimizer settings
+  learning_rate: 1.0e-4
+  lr_warmup_steps: 5000
+  weight_decay: 0.0
+  
+  # EMA settings
+  use_ema: true
+  ema_decay: 0.9999
+  
+  # Gradient settings
+  grad_clip: 1.0
+  accum_iter: 1
+  
+  # Checkpoint settings
+  ckpt_every: 5000
+  log_every: 100
+  sample_every: 2500

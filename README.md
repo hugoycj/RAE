@@ -16,12 +16,17 @@ This repository contains:
 
 PyTorch/GPU:
 * A PyTorch implementation of RAE and pretrained weights.
+* A PyTorch implementation of VQRAE (Vector Quantized RAE) with discrete latent codes.
 * A PyTorch implementation of LightningDiT, DiT<sup>DH</sup> and pretrained weights.
 * Training and sampling scripts for the two-stage RAE+DiT pipeline.
 
 TorchXLA/TPU:
 * A TPU implementation of RAE and pretrained weights.
 * Sampling of RAE and DiT<sup>DH</sup> on TPU.
+
+### VQRAE
+
+VQRAE extends RAE with vector quantization for discrete latent representations. See [docs/VQRAE.md](docs/VQRAE.md) for details.
 
 ## Environment
 
