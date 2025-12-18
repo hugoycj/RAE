@@ -4,9 +4,13 @@
 """
 SimVQ: Similarity-based Vector Quantization
 
-This module implements SimVQ (Similarity Vector Quantization) as described in the
-VQRAE paper. SimVQ uses cosine similarity with learnable projection matrices to
-avoid codebook collapse and improve quantization quality.
+This module implements SimVQ as described in "SimVQ: Addressing Representation 
+Collapse in Vector Quantized Models with One Linear Layer" (arXiv:2411.02038).
+
+SimVQ uses a frozen codebook with a learnable linear projection to avoid 
+codebook collapse while achieving 100% codebook utilization.
+
+Reference implementation: https://github.com/youngsheen/SimVQ
 """
 
 import torch
@@ -17,18 +21,17 @@ from typing import Tuple
 
 class SimVQ(nn.Module):
     """
-    Similarity-based Vector Quantization (SimVQ).
+    SimVQ: Vector Quantization with frozen codebook and learnable projection.
     
-    Unlike standard VQ which uses L2 distance, SimVQ uses cosine similarity
-    with learnable projection matrices. This improves stability and avoids
-    codebook collapse.
+    Key idea: Instead of learning the codebook directly, SimVQ keeps the codebook
+    frozen and learns a single linear projection layer. This simple modification
+    achieves 100% codebook utilization and prevents representation collapse.
     
     Args:
         num_embeddings (int): Size of the codebook (number of discrete codes).
         embedding_dim (int): Dimensionality of each embedding vector.
-        commitment_cost (float): Weight for the commitment loss term.
-        use_projection (bool): Whether to use learnable projection matrices.
-        projection_dim (int): Dimension of projection space (if None, uses embedding_dim).
+        commitment_cost (float): Weight for the commitment loss term (beta).
+        legacy (bool): If True, uses legacy loss formulation (for backwards compatibility).
         epsilon (float): Small constant for numerical stability.
     """
     
@@ -37,37 +40,29 @@ class SimVQ(nn.Module):
         num_embeddings: int,
         embedding_dim: int,
         commitment_cost: float = 0.25,
-        use_projection: bool = True,
-        projection_dim: int = None,
+        legacy: bool = True,
         epsilon: float = 1e-5,
     ):
         super().__init__()
         
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        self.commitment_cost = commitment_cost
-        self.use_projection = use_projection
-        self.projection_dim = projection_dim or embedding_dim
+        self.commitment_cost = commitment_cost  # beta in the paper
+        self.legacy = legacy
         self.epsilon = epsilon
         
-        # Initialize codebook with uniform distribution
-        self.register_buffer('embedding', torch.empty(num_embeddings, embedding_dim))
-        self.embedding.data.uniform_(-1.0 / num_embeddings, 1.0 / num_embeddings)
+        # Frozen codebook - initialized with normal distribution
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+        nn.init.normal_(self.embedding.weight, mean=0, std=embedding_dim**-0.5)
+        # Freeze the codebook
+        for p in self.embedding.parameters():
+            p.requires_grad = False
         
-        # Learnable projection matrices (key component of SimVQ)
-        if use_projection:
-            self.input_proj = nn.Linear(embedding_dim, self.projection_dim, bias=False)
-            self.codebook_proj = nn.Linear(embedding_dim, self.projection_dim, bias=False)
-            # Initialize projections
-            nn.init.xavier_uniform_(self.input_proj.weight)
-            nn.init.xavier_uniform_(self.codebook_proj.weight)
-        else:
-            self.input_proj = None
-            self.codebook_proj = None
+        # Learnable projection layer (the key component of SimVQ)
+        self.embedding_proj = nn.Linear(embedding_dim, embedding_dim, bias=True)
         
-        # EMA for codebook updates (optional, can be disabled for fully learnable codebook)
+        # For tracking codebook usage
         self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
-        self.register_buffer('ema_w', self.embedding.clone())
         
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -87,58 +82,52 @@ class SimVQ(nn.Module):
         is_2d_input = len(input_shape) == 4  # (B, C, H, W)
         
         if is_2d_input:
-            # Flatten spatial dimensions: (B, C, H, W) -> (B, C, H*W) -> (B, H*W, C)
-            z_flattened = z.view(input_shape[0], input_shape[1], -1).permute(0, 2, 1).contiguous()
+            # Flatten spatial dimensions: (B, C, H, W) -> (B, H, W, C)
+            z = z.permute(0, 2, 3, 1).contiguous()
+        
+        # Flatten to (B*N, C) for distance computation
+        z_flattened = z.view(-1, self.embedding_dim)
+        
+        # Project the codebook using the learnable linear layer
+        quant_codebook = self.embedding_proj(self.embedding.weight)
+        
+        # Compute L2 distances: (z - e)^2 = z^2 + e^2 - 2*z*e
+        distances = (
+            torch.sum(z_flattened ** 2, dim=1, keepdim=True) +
+            torch.sum(quant_codebook ** 2, dim=1) -
+            2 * torch.matmul(z_flattened, quant_codebook.t())
+        )
+        
+        # Get nearest codebook entries (minimum distance)
+        encoding_indices = torch.argmin(distances, dim=1)
+        
+        # Quantize using the projected codebook
+        quantized = F.embedding(encoding_indices, quant_codebook).view(z.shape)
+        
+        # Compute loss
+        if not self.legacy:
+            # Standard formulation: beta * commitment + codebook
+            vq_loss = (
+                self.commitment_cost * torch.mean((quantized.detach() - z) ** 2) +
+                torch.mean((quantized - z.detach()) ** 2)
+            )
         else:
-            # Already in (B, N, C) format
-            z_flattened = z.contiguous()
-        
-        # Flatten to (B*N, C) for similarity computation
-        flat_input = z_flattened.view(-1, self.embedding_dim)
-        
-        # Apply projections if enabled (SimVQ key feature)
-        if self.use_projection:
-            flat_input_proj = self.input_proj(flat_input)
-            codebook_proj = self.codebook_proj(self.embedding)
-            
-            # Normalize for cosine similarity
-            flat_input_norm = F.normalize(flat_input_proj, p=2, dim=1)
-            codebook_norm = F.normalize(codebook_proj, p=2, dim=1)
-        else:
-            # Direct cosine similarity without projection
-            flat_input_norm = F.normalize(flat_input, p=2, dim=1)
-            codebook_norm = F.normalize(self.embedding, p=2, dim=1)
-        
-        # Compute cosine similarity (higher is better)
-        similarity = torch.matmul(flat_input_norm, codebook_norm.t())
-        
-        # Get nearest codebook entries (highest similarity)
-        encoding_indices = torch.argmax(similarity, dim=1).unsqueeze(1)
-        encodings = torch.zeros(encoding_indices.shape[0], self.num_embeddings, device=z.device)
-        encodings.scatter_(1, encoding_indices, 1)
-        
-        # Quantize using the codebook
-        quantized = torch.matmul(encodings, self.embedding).view(z_flattened.shape)
-        
-        # Calculate losses
-        # Commitment loss: encourages encoder output to stay close to chosen codebook entry
-        e_latent_loss = F.mse_loss(quantized.detach(), z_flattened)
-        # Codebook loss: encourages codebook entries to move closer to encoder outputs
-        q_latent_loss = F.mse_loss(quantized, z_flattened.detach())
-        
-        vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
+            # Legacy formulation (buggy but kept for backwards compatibility)
+            vq_loss = (
+                torch.mean((quantized.detach() - z) ** 2) +
+                self.commitment_cost * torch.mean((quantized - z.detach()) ** 2)
+            )
         
         # Straight-through estimator: copy gradients from decoder to encoder
-        quantized = z_flattened + (quantized - z_flattened).detach()
+        quantized = z + (quantized - z).detach()
         
         # Reshape back to input format
         if is_2d_input:
-            # (B, H*W, C) -> (B, C, H*W) -> (B, C, H, W)
-            quantized = quantized.permute(0, 2, 1).contiguous()
-            quantized = quantized.view(input_shape)
+            # (B, H, W, C) -> (B, C, H, W)
+            quantized = quantized.permute(0, 3, 1, 2).contiguous()
             encoding_indices = encoding_indices.view(input_shape[0], input_shape[2], input_shape[3])
         else:
-            # Already in correct (B, N, C) format
+            # (B, N, C) format
             encoding_indices = encoding_indices.view(input_shape[0], input_shape[1])
         
         return quantized, vq_loss, encoding_indices
@@ -151,9 +140,11 @@ class SimVQ(nn.Module):
             indices: Tensor of codebook indices
         
         Returns:
-            Codebook entries corresponding to the indices
+            Codebook entries corresponding to the indices (from projected codebook)
         """
-        return F.embedding(indices, self.embedding)
+        # Use projected codebook for retrieval
+        quant_codebook = self.embedding_proj(self.embedding.weight)
+        return F.embedding(indices, quant_codebook)
     
     def get_codebook_usage(self) -> float:
         """
