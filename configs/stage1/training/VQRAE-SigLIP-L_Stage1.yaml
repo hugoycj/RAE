@@ -10,7 +10,7 @@ stage_1:
       num_tokens: 196  # 14x14 patches for 224x224 input
     
     # Decoder configuration - Symmetric ViT (mirrors encoder)
-    decoder_config_path: 'configs/decoder/ViTL_symmetric'  # Same depth as SigLIP-L (24 layers)
+    decoder_config_path: 'configs/decoder/ViTXL'  # Same depth as SigLIP-L (24 layers)
     decoder_patch_size: 16
     
     # Vector Quantization parameters (SimVQ)
@@ -30,70 +30,55 @@ stage_1:
     reshape_to_2d: true
     normalization_stat_path: null  # Computed during training
 
-# Training configuration for Stage-1 (Frozen Encoder)
+# Training configuration
 training:
-  stage: 1
-  global_seed: 42
-  
-  # Dataset
-  dataset: 'datacomp1b'  # DataComp-1B (1.1B images)
-  num_epochs: 30
-  
-  # Batch configuration
-  batch_size: 512  # Per-GPU batch size
-  # Global batch size = 512 * 8 GPUs = 4096 (as specified in paper)
+  epochs: 16
+  ema_decay: 0.9978
+  batch_size: 32 # per-proc bs
   num_workers: 8
-  gradient_accumulation_steps: 1
-  
-  # Optimizer settings (Stage-1)
-  learning_rate: 1.0e-3  # 1e-3 for codebook & decoder
-  optimizer: 'AdamW'
-  weight_decay: 0.05
-  betas: [0.9, 0.95]
-  
-  # Learning rate schedule
-  lr_warmup_steps: 5000
-  lr_schedule: 'cosine'
-  min_lr_ratio: 0.1
-  
-  # Loss weights (Stage-1)
-  recon_weight: 1.0  # L2 reconstruction loss
-  lpips_weight: 1.0  # Perceptual loss (LPIPS)
-  gan_weight: 0.8  # GAN loss
-  vq_weight: 1.0  # VQ loss
-  
-  # EMA settings
-  use_ema: true
-  ema_decay: 0.9999
-  
-  # Checkpointing
-  ckpt_every: 5000
-  log_every: 100
-  sample_every: 2500
-  
-  # Precision
-  precision: 'bf16'  # BFloat16 for efficiency
-  
-# GAN discriminator configuration (Patch-based)
-gan:
-  target: disc.dinodisc.DinoDisc
-  params:
-    encoder_cls: 'Dinov2'
-    encoder_path: 'facebook/dinov2-base'
-    input_size: 224
-    freeze_encoder: true
-    patch_based: true  # Patch-based discriminator as per paper
-  
-  # Loss schedule
-  disc_start: 10000  # Start discriminator after 10k steps
-  disc_weight: 0.8
-  gen_kind: 'vanilla'
-  disc_kind: 'hinge'
-  lpips_weight: 1.0
-  recon_weight: 1.0
-  vq_weight: 1.0
+  clip_grad: 0.0
+  log_interval: 100
+  checkpoint_interval: 5000
+  sample_interval: 0
+  optimizer:
+    lr: 2.0e-4
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: cosine
+    warmup_epochs: 1
+    decay_end_epoch: 16
+    base_lr: 2.0e-4
+    final_lr: 2.0e-5
 
-# LPIPS perceptual loss
-lpips:
-  network: 'vgg'  # VGG-based LPIPS
-  lpips_start: 0  # Use LPIPS from the beginning
+gan:
+  disc:
+    arch:
+      dino_ckpt_path: 'models/discs/dino_vit_small_patch8_224.pth'
+      ks: 9
+      norm_type: 'bn'
+      using_spec_norm: true
+      recipe: 'S_8'
+    optimizer:
+      lr: 2.0e-4
+      betas: [0.9, 0.95]
+      weight_decay: 0.0
+    scheduler:
+      type: cosine
+      warmup_epochs: 1
+      decay_end_epoch: 16
+      base_lr: 2.0e-4
+      final_lr: 2.0e-5
+    augment:
+      prob: 1.0
+      cutout: 0.0
+  loss:
+    disc_loss: hinge
+    gen_loss: vanilla
+    disc_weight: 0.75
+    perceptual_weight: 1.0
+    disc_start: 8
+    disc_upd_start: 6
+    lpips_start: 0
+    max_d_weight: 10000.0
+    disc_updates: 1
