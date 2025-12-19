@@ -98,11 +98,19 @@ def cleanup_distributed():
 
 @torch.no_grad()
 def update_ema(ema_model: torch.nn.Module, current_model: torch.nn.Module, decay: float) -> None:
+    # Update parameters
     ema_params = dict(ema_model.named_parameters())
     model_params = dict(current_model.named_parameters())
     for name, param in model_params.items():
         if name in ema_params:
             ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+
+    # Also update buffers (important for VectorQuantizer which uses register_buffer for embeddings)
+    ema_buffers = dict(ema_model.named_buffers())
+    model_buffers = dict(current_model.named_buffers())
+    for name, buf in model_buffers.items():
+        if name in ema_buffers and buf.dtype.is_floating_point:
+            ema_buffers[name].mul_(decay).add_(buf.data, alpha=1 - decay)
 
 
 def calculate_adaptive_weight(
@@ -282,14 +290,26 @@ def main():
     rae: RAE = instantiate_from_config(rae_config).to(device)
     rae.encoder.eval()
     rae.decoder.train()
+    # Check if model has a quantizer (VQRAE) and set it to train mode
+    has_quantizer = hasattr(rae, 'quantizer') and rae.quantizer is not None
+    if has_quantizer:
+        rae.quantizer.train()
     ema_model = deepcopy(rae).to(device).eval()
     ema_model.requires_grad_(False)
-    # only train decoder
+    # only train decoder (and quantizer if present)
     rae.encoder.requires_grad_(False)
     rae.decoder.requires_grad_(True)
+    if has_quantizer:
+        rae.quantizer.requires_grad_(True)
     ddp_model = DDP(rae, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
     decoder = ddp_model.module.decoder
-    optimizer, optim_msg = build_optimizer(decoder.parameters(), training_cfg)
+    # Build optimizer for decoder + quantizer (if present)
+    if has_quantizer:
+        quantizer = ddp_model.module.quantizer
+        trainable_params = list(decoder.parameters()) + list(quantizer.parameters())
+        optimizer, optim_msg = build_optimizer(trainable_params, training_cfg)
+    else:
+        optimizer, optim_msg = build_optimizer(decoder.parameters(), training_cfg)
     model_woddp = ddp_model.module
     discriminator, disc_aug = build_discriminator(disc_cfg, device)
     disc_params = [p for p in discriminator.parameters() if p.requires_grad]
@@ -349,6 +369,9 @@ def main():
     if rank == 0:
         num_params = sum(p.numel() for p in ddp_model.parameters() if p.requires_grad)
         logger.info(f"Stage-1 RAE trainable parameters: {num_params/1e6:.2f}M")
+        if has_quantizer:
+            num_quant_params = sum(p.numel() for p in ddp_model.module.quantizer.parameters() if p.requires_grad)
+            logger.info(f"Quantizer trainable parameters: {num_quant_params/1e6:.2f}M")
         logger.info(f"Discriminator architecture:\n{discriminator}")
         num_params = sum(p.numel() for p in discriminator.parameters() if p.requires_grad)
         logger.info(f"Discriminator trainable parameters: {num_params/1e6:.2f}M")
@@ -392,8 +415,15 @@ def main():
             discriminator.eval()
 
             with autocast(**autocast_kwargs):
-                with torch.no_grad():
+                # For VQRAE, we need gradients through encode for the quantizer
+                # For RAE, we can use no_grad since encoder is frozen
+                if has_quantizer:
                     z = model_woddp.encode(images)
+                    vq_loss = model_woddp.last_vq_loss if model_woddp.last_vq_loss is not None else torch.zeros(1, device=device)
+                else:
+                    with torch.no_grad():
+                        z = model_woddp.encode(images)
+                    vq_loss = torch.zeros(1, device=device)
                 recon = model_woddp.decode(z)
                 recon_normed = recon * 2.0 - 1.0
                 rec_loss = F.l1_loss(recon, images)
@@ -401,7 +431,7 @@ def main():
                     lpips_loss = lpips(real_normed, recon_normed)
                 else:
                     lpips_loss = rec_loss.new_zeros(())
-                recon_total = rec_loss + perceptual_weight * lpips_loss
+                recon_total = rec_loss + perceptual_weight * lpips_loss + vq_loss
 
                 if use_gan:
                     fake_aug = disc_aug.aug(recon_normed)
@@ -480,6 +510,8 @@ def main():
             epoch_metrics["lpips"] += lpips_loss.detach()
             epoch_metrics["gan"] += gan_loss.detach()
             epoch_metrics["total"] += total_loss.detach()
+            if has_quantizer:
+                epoch_metrics["vq"] += vq_loss.detach()
             num_batches += 1
 
             if log_interval > 0 and global_step % log_interval == 0 and rank == 0:
@@ -491,6 +523,8 @@ def main():
                     "gan/weight": adaptive_weight.detach().item(),
                     "lr/generator": optimizer.param_groups[0]["lr"],
                 }
+                if has_quantizer:
+                    stats["loss/vq"] = vq_loss.detach().item()
                 if disc_metrics:
                     stats.update(
                         {
@@ -535,6 +569,9 @@ def main():
                 "epoch/loss_lpips": avg_lpips,
                 "epoch/loss_gan": avg_gan,
             }
+            if has_quantizer:
+                avg_vq = (epoch_metrics["vq"] / num_batches).item()
+                epoch_stats["epoch/loss_vq"] = avg_vq
             logger.info(
                 f"[Epoch {epoch}] "
                 + ", ".join(f"{k}: {v:.4f}" for k, v in epoch_stats.items())
