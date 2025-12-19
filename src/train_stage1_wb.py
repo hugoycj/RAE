@@ -335,7 +335,7 @@ def main():
         model_string_name = model_target.split(".")[-1]
         precision_suffix = f"-{args.precision}" if args.precision == "bf16" else ""
         experiment_name = (
-            f"{experiment_index:03d}-{model_string_name}{precision_suffix}"
+            f"{experiment_index:03d}-{model_string_name}{precision_suffix}-w-vqloss"
         )
         experiment_dir = os.path.join(args.results_dir, experiment_name)
         checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -490,15 +490,6 @@ def main():
             use_lpips = global_step >= lpips_start_step and perceptual_weight > 0.0
             images = images.to(device, non_blocking=True)
             real_normed = images * 2.0 - 1.0
-            from torchvision.utils import save_image
-            if rank==0:
-                save_image(
-                    images,                       
-                    f"results/debug/debug_{step}.png",        
-                    nrow=8,                  
-                    normalize=True           
-                )
-            #     raise ValueError
             optimizer.zero_grad(set_to_none=True)
             discriminator.eval()
 

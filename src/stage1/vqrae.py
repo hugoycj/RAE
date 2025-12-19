@@ -164,8 +164,9 @@ class VQRAE(RAE):
             # Then quantize in (B, C, H, W) format
             z_q, vq_loss, indices = self.quantizer(z)
         
-        # Store VQ loss for monitoring
-        self.last_vq_loss = vq_loss.detach() if vq_loss is not None else None
+        # Store VQ loss for training (keep gradients for backprop)
+        # Note: Don't detach here - the training script needs gradients to flow through
+        self.last_vq_loss = vq_loss
         # Store commitment loss if available (for SimVQ)
         if hasattr(self.quantizer, 'last_commit_loss'):
             self.last_commit_loss = self.quantizer.last_commit_loss
