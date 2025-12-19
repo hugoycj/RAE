@@ -64,9 +64,12 @@ class SimVQ(nn.Module):
         # For tracking codebook usage
         self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
         
-        # For tracking losses
+        # For tracking losses (used by training script - must keep gradients)
         self.last_commit_loss = None
         self.last_codebook_loss = None
+        # For monitoring only (detached)
+        self.last_commit_loss_detached = None
+        self.last_codebook_loss_detached = None
         
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -118,9 +121,12 @@ class SimVQ(nn.Module):
         # We still compute it for compatibility but it won't contribute to gradients
         codebook_loss = torch.mean((quantized - z.detach()) ** 2)
         
-        # Store for monitoring
-        self.last_commit_loss = commitment_loss.detach()
-        self.last_codebook_loss = codebook_loss.detach()
+        # Store for training (keep gradients for backprop)
+        self.last_commit_loss = commitment_loss
+        self.last_codebook_loss = codebook_loss
+        # Store detached versions for monitoring only
+        self.last_commit_loss_detached = commitment_loss.detach()
+        self.last_codebook_loss_detached = codebook_loss.detach()
         
         if not self.legacy:
             # Standard formulation: beta * commitment + codebook

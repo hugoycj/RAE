@@ -165,9 +165,8 @@ class VQRAE(RAE):
             z_q, vq_loss, indices = self.quantizer(z)
         
         # Store VQ loss for training (keep gradients for backprop)
-        # Note: Don't detach here - the training script needs gradients to flow through
         self.last_vq_loss = vq_loss
-        # Store commitment loss if available (for SimVQ)
+        # Store commitment loss if available (for SimVQ) - keep gradients
         if hasattr(self.quantizer, 'last_commit_loss'):
             self.last_commit_loss = self.quantizer.last_commit_loss
         
@@ -252,7 +251,7 @@ class VQRAE(RAE):
                 z = z.transpose(1, 2).view(b, c, h_lat, w_lat)
             z_q, vq_loss, indices = self.quantizer(z)
         
-        # Store commitment loss if available (for SimVQ)
+        # Store commitment loss if available (for SimVQ) - keep gradients for training
         if hasattr(self.quantizer, 'last_commit_loss'):
             self.last_commit_loss = self.quantizer.last_commit_loss
         
