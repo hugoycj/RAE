@@ -64,6 +64,10 @@ class SimVQ(nn.Module):
         # For tracking codebook usage
         self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
         
+        # For tracking losses
+        self.last_commit_loss = None
+        self.last_codebook_loss = None
+        
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass through SimVQ.
@@ -105,18 +109,25 @@ class SimVQ(nn.Module):
         quantized = F.embedding(encoding_indices, quant_codebook).view(z.shape)
         
         # Compute loss
+        # For SimVQ, codebook is frozen, so only commitment loss is meaningful
+        # Commitment loss: encourages encoder output to stay close to chosen codebook entry
+        commitment_loss = torch.mean((quantized.detach() - z) ** 2)
+        
+        # Codebook loss would be: torch.mean((quantized - z.detach()) ** 2)
+        # But since codebook is frozen (requires_grad=False), this is always 0 in practice
+        # We still compute it for compatibility but it won't contribute to gradients
+        codebook_loss = torch.mean((quantized - z.detach()) ** 2)
+        
+        # Store for monitoring
+        self.last_commit_loss = commitment_loss.detach()
+        self.last_codebook_loss = codebook_loss.detach()
+        
         if not self.legacy:
             # Standard formulation: beta * commitment + codebook
-            vq_loss = (
-                self.commitment_cost * torch.mean((quantized.detach() - z) ** 2) +
-                torch.mean((quantized - z.detach()) ** 2)
-            )
+            vq_loss = self.commitment_cost * commitment_loss + codebook_loss
         else:
-            # Legacy formulation (buggy but kept for backwards compatibility)
-            vq_loss = (
-                torch.mean((quantized.detach() - z) ** 2) +
-                self.commitment_cost * torch.mean((quantized - z.detach()) ** 2)
-            )
+            # Legacy formulation (used by reference SimVQ for backwards compatibility)
+            vq_loss = commitment_loss + self.commitment_cost * codebook_loss
         
         # Straight-through estimator: copy gradients from decoder to encoder
         quantized = z + (quantized - z).detach()
