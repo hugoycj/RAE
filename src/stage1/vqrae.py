@@ -84,7 +84,6 @@ class VQRAE(RAE):
                 num_embeddings=num_embeddings,
                 embedding_dim=self.latent_dim,
                 commitment_cost=commitment_cost,
-                use_projection=True,  # Key feature of SimVQ
                 epsilon=vq_epsilon,
             )
             print(f"Initialized VQRAE with SimVQ (codebook size: {num_embeddings}, dim: {self.latent_dim})")
