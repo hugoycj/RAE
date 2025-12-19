@@ -78,6 +78,10 @@ class VQRAE(RAE):
         self.use_simvq = use_simvq
         self.freeze_encoder = freeze_encoder
         
+        # For tracking losses
+        self.last_vq_loss = None
+        self.last_commit_loss = None
+        
         if use_simvq:
             from .simvq import SimVQ
             self.quantizer = SimVQ(
@@ -162,6 +166,9 @@ class VQRAE(RAE):
         
         # Store VQ loss for monitoring
         self.last_vq_loss = vq_loss.detach() if vq_loss is not None else None
+        # Store commitment loss if available (for SimVQ)
+        if hasattr(self.quantizer, 'last_commit_loss'):
+            self.last_commit_loss = self.quantizer.last_commit_loss
         
         # Apply normalization if enabled
         if self.do_normalization:
@@ -243,6 +250,10 @@ class VQRAE(RAE):
                 assert h_lat * w_lat == n, f"Number of patches {n} must be a perfect square for 2D reshaping"
                 z = z.transpose(1, 2).view(b, c, h_lat, w_lat)
             z_q, vq_loss, indices = self.quantizer(z)
+        
+        # Store commitment loss if available (for SimVQ)
+        if hasattr(self.quantizer, 'last_commit_loss'):
+            self.last_commit_loss = self.quantizer.last_commit_loss
         
         # Apply normalization
         if self.do_normalization:
