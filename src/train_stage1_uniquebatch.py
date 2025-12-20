@@ -5,6 +5,8 @@ Stage-1 RAE training script with reconstruction, LPIPS, and GAN losses.
 
 This script adapts the training logic from the Kakao Brain VQGAN trainer while
 targeting the RAE autoencoder architecture used in this repository.
+
+MODIFIED: Supports WebDataset training.
 """
 
 from __future__ import annotations
@@ -13,10 +15,11 @@ import argparse
 import logging
 import math
 import os
+import glob
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -27,8 +30,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
-from glob import glob
+# from torchvision.datasets import ImageFolder # Removed for WebDataset
+
+# Added WebDataset
+import webdataset as wds
 
 from omegaconf import OmegaConf
 
@@ -48,9 +53,13 @@ from utils.optim_utils import build_optimizer, build_scheduler
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Stage-1 RAE with GAN and LPIPS losses.")
+    parser = argparse.ArgumentParser(description="Train Stage-1 RAE with GAN and LPIPS losses (WebDataset).")
     parser.add_argument("--config", type=str, required=True, help="YAML config containing a stage_1 section.")
-    parser.add_argument("--data-path", type=Path, required=True, help="Directory with ImageFolder structure.")
+    
+    # Modified args for WebDataset
+    parser.add_argument("--data-path", type=str, required=True, help="Path to WebDataset shards (e.g., '/path/{00..99}.tar' or '/path/*.tar').")
+    parser.add_argument("--train-num-samples", type=int, required=True, help="Total number of samples in the dataset (required for WebDataset steps calculation).")
+    
     parser.add_argument("--results-dir", type=str, default="results", help="Directory to store training outputs.")
     parser.add_argument("--image-size", type=int, default=256, help="Image resolution (assumes square images).")
     parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="fp32")
@@ -98,19 +107,11 @@ def cleanup_distributed():
 
 @torch.no_grad()
 def update_ema(ema_model: torch.nn.Module, current_model: torch.nn.Module, decay: float) -> None:
-    # Update parameters
     ema_params = dict(ema_model.named_parameters())
     model_params = dict(current_model.named_parameters())
     for name, param in model_params.items():
         if name in ema_params:
             ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
-
-    # Also update buffers (important for VectorQuantizer which uses register_buffer for embeddings)
-    ema_buffers = dict(ema_model.named_buffers())
-    model_buffers = dict(current_model.named_buffers())
-    for name, buf in model_buffers.items():
-        if name in ema_buffers and buf.dtype.is_floating_point:
-            ema_buffers[name].mul_(decay).add_(buf.data, alpha=1 - decay)
 
 
 def calculate_adaptive_weight(
@@ -125,35 +126,107 @@ def calculate_adaptive_weight(
     d_weight = torch.clamp(d_weight, 0.0, max_d_weight)
     return d_weight.detach()
 
+def key_to_object_id(key: str) -> str:
+    return key.split("/")[0]
 
+def batched_unique_by_object(batch_size, max_skip=200000):
+    def _stage(src):
+        batch = []
+        seen = set()
+        skipped = 0
+
+        for img, oid in src:  # 注意：这里解包 tuple
+            if oid in seen:
+                skipped += 1
+                if skipped >= max_skip:
+                    # 防止凑不齐 batch 卡住：直接丢弃当前半成品 batch
+                    batch = []
+                    seen = set()
+                    skipped = 0
+                continue
+
+            seen.add(oid)
+            batch.append((img, oid))
+
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+                seen = set()
+                skipped = 0
+
+        # drop_last: 不 yield 不满的 batch
+    return _stage
 
 def prepare_dataloader(
-    data_path: Path,
+    data_path: str,
     image_size: int,
     batch_size: int,
     workers: int,
     rank: int,
     world_size: int,
-) -> Tuple[DataLoader, DistributedSampler]:
+    train_num_samples: int,
+) -> Tuple[DataLoader, Optional[DistributedSampler]]:
+    """
+    Creates a WebDataset loader.
+    """
     first_crop_size = 384 if image_size == 256 else int(image_size * 1.5)
-    transform = transforms.Compose(
+    
+    # 1. Resolve URLs
+    # If data_path is a directory, glob for tar files
+    if os.path.isdir(data_path):
+        urls = sorted(glob.glob(os.path.join(data_path, "*.tar")))
+    # If using wildcards *, we resolve it via glob.
+    elif "*" in data_path and "{" not in data_path:
+        urls = sorted(glob.glob(data_path))
+    else:
+        urls = data_path
+
+    # 2. Define Transform
+    # WebDataset decodes to PIL, so we use standard torchvision transforms
+    train_transform = transforms.Compose(
         [
             transforms.Resize(first_crop_size, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.RandomCrop(image_size),
             transforms.ToTensor(),
         ]
     )
-    dataset = ImageFolder(str(data_path), transform=transform)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+
+    def transform_fn(sample):
+        # sample is a tuple (image_tensor,) because of .to_tuple("jpg;png;jpeg")
+        img = sample[0] 
+        return train_transform(img), 0  # Return 0 as dummy label to match (images, _) loop expectation
+
+    # 3. Build Pipeline
+    # Modified: Use wds.DataPipeline explicitly to avoid version incompatibilities 
+    # with WebDataset constructor arguments or method chaining.
+    dataset = wds.DataPipeline(
+        wds.SimpleShardList(urls),
+        wds.shuffle(2000),
+        wds.split_by_node,
+        wds.split_by_worker,
+        wds.tarfile_to_samples(),
+        wds.shuffle(20000),
+        wds.decode("pil"),
+        wds.to_tuple("__key__", "rgb.webp"),
+        wds.map(lambda t: (train_transform(t[1]), key_to_object_id(t[0]))),
+        batched_unique_by_object(batch_size),
+    )
+
+    # 4. Handle Length
+    # We must explicitly set length for Dataloader to know steps_per_epoch
+    samples_per_rank = train_num_samples // world_size // batch_size * 45
+    dataset = dataset.with_length(samples_per_rank)
+
+    # 5. Create DataLoader
+    # Note: No DistributedSampler needed; split_by_node handles distribution.
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
-        sampler=sampler,
+        batch_size=None,
         num_workers=workers,
         pin_memory=True,
-        drop_last=True,
     )
-    return loader, sampler
+
+    return loader, None  # Sampler is None for WebDataset
 
 
 def select_gan_losses(disc_kind: str, gen_kind: str):
@@ -266,12 +339,12 @@ def main():
     torch.cuda.manual_seed_all(seed)
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)
-        experiment_index = len(glob(f"{args.results_dir}/*")) - 1
+        experiment_index = len(glob.glob(f"{args.results_dir}/*")) - 1
         model_target = str(rae_config.get("target", "stage1"))
         model_string_name = model_target.split(".")[-1]
         precision_suffix = f"-{args.precision}" if args.precision == "bf16" else ""
         experiment_name = (
-            f"{experiment_index:03d}-{model_string_name}{precision_suffix}"
+            f"{Path(args.config).stem}-{experiment_index:03d}-{model_string_name}{precision_suffix}"
         )
         experiment_dir = os.path.join(args.results_dir, experiment_name)
         checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -279,8 +352,8 @@ def main():
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
         if args.wandb:
-            entity = os.environ["ENTITY"]
-            project = os.environ["PROJECT"]
+            entity = os.environ.get("ENTITY", "default_entity")
+            project = os.environ.get("PROJECT", "default_project")
             wandb_utils.initialize(args, entity, experiment_name, project)
     else:
         experiment_dir = None
@@ -290,26 +363,14 @@ def main():
     rae: RAE = instantiate_from_config(rae_config).to(device)
     rae.encoder.eval()
     rae.decoder.train()
-    # Check if model has a quantizer (VQRAE) and set it to train mode
-    has_quantizer = hasattr(rae, 'quantizer') and rae.quantizer is not None
-    if has_quantizer:
-        rae.quantizer.train()
     ema_model = deepcopy(rae).to(device).eval()
     ema_model.requires_grad_(False)
-    # only train decoder (and quantizer if present)
+    # only train decoder
     rae.encoder.requires_grad_(False)
     rae.decoder.requires_grad_(True)
-    if has_quantizer:
-        rae.quantizer.requires_grad_(True)
     ddp_model = DDP(rae, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
     decoder = ddp_model.module.decoder
-    # Build optimizer for decoder + quantizer (if present)
-    if has_quantizer:
-        quantizer = ddp_model.module.quantizer
-        trainable_params = list(decoder.parameters()) + list(quantizer.parameters())
-        optimizer, optim_msg = build_optimizer(trainable_params, training_cfg)
-    else:
-        optimizer, optim_msg = build_optimizer(decoder.parameters(), training_cfg)
+    optimizer, optim_msg = build_optimizer(decoder.parameters(), training_cfg)
     model_woddp = ddp_model.module
     discriminator, disc_aug = build_discriminator(disc_cfg, device)
     disc_params = [p for p in discriminator.parameters() if p.requires_grad]
@@ -334,12 +395,20 @@ def main():
         scaler = None
         autocast_kwargs = dict(enabled=False)
 
+    # Use modified loader with WebDataset
     loader, sampler = prepare_dataloader(
-        args.data_path, args.image_size, batch_size, num_workers, rank, world_size
+        args.data_path, 
+        args.image_size, 
+        batch_size, 
+        num_workers, 
+        rank, 
+        world_size,
+        args.train_num_samples  # Pass dataset length
     )
+    
     steps_per_epoch = len(loader)
     if steps_per_epoch == 0:
-        raise RuntimeError("Dataloader returned zero batches. Check dataset and batch size settings.")
+        raise RuntimeError("Dataloader returned zero batches. Check dataset path and train-num-samples.")
 
     scheduler: LambdaLR | None = None
     sched_msg: Optional[str] = None
@@ -369,9 +438,6 @@ def main():
     if rank == 0:
         num_params = sum(p.numel() for p in ddp_model.parameters() if p.requires_grad)
         logger.info(f"Stage-1 RAE trainable parameters: {num_params/1e6:.2f}M")
-        if has_quantizer:
-            num_quant_params = sum(p.numel() for p in ddp_model.module.quantizer.parameters() if p.requires_grad)
-            logger.info(f"Quantizer trainable parameters: {num_quant_params/1e6:.2f}M")
         logger.info(f"Discriminator architecture:\n{discriminator}")
         num_params = sum(p.numel() for p in discriminator.parameters() if p.requires_grad)
         logger.info(f"Discriminator trainable parameters: {num_params/1e6:.2f}M")
@@ -392,7 +458,8 @@ def main():
         logger.info(disc_optim_msg)
         print(disc_sched_msg if disc_sched_msg else "No LR scheduler for discriminator.")
         logger.info(f"Training for {num_epochs} epochs, batch size {batch_size} per GPU.")
-        logger.info(f"Dataset contains {len(loader.dataset)} samples, {steps_per_epoch} steps per epoch.")
+        # logger.info(f"Dataset contains {len(loader.dataset)} samples, {steps_per_epoch} steps per epoch.")
+        logger.info(f"Steps per epoch: {steps_per_epoch}. Total approximated samples: {args.train_num_samples}.")
         logger.info(f"Running with world size {world_size}, starting from epoch {start_epoch} to {num_epochs}.")
 
 
@@ -402,28 +469,37 @@ def main():
     lpips_start_step = lpips_start_epoch * steps_per_epoch
     for epoch in range(start_epoch, num_epochs):
         ddp_model.train()
-        sampler.set_epoch(epoch)
+        
+        # WebDataset doesn't need set_epoch on the sampler, 
+        # but we keep this check to avoid errors if sampler is None
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+            
         epoch_metrics: Dict[str, torch.Tensor] = defaultdict(lambda: torch.zeros(1, device=device))
         num_batches = 0
-        for step, (images, _) in enumerate(loader):
+        for step, batch in enumerate(loader):
+            images, object_ids = zip(*batch)
+            images = torch.stack(images, dim=0)
             use_gan = global_step >= gan_start_step and disc_weight > 0.0
             train_disc = global_step >= disc_update_step and disc_weight > 0.0
             use_lpips = global_step >= lpips_start_step and perceptual_weight > 0.0
             images = images.to(device, non_blocking=True)
             real_normed = images * 2.0 - 1.0
+            # from torchvision.utils import save_image
+            # if rank==0:
+            #     save_image(
+            #         images,                       
+            #         f"results/debug/debug_{step}.png",        
+            #         nrow=8,                  
+            #         normalize=True           
+            #     )
+            #     raise ValueError
             optimizer.zero_grad(set_to_none=True)
             discriminator.eval()
 
             with autocast(**autocast_kwargs):
-                # For VQRAE, we need gradients through encode for the quantizer
-                # For RAE, we can use no_grad since encoder is frozen
-                if has_quantizer:
+                with torch.no_grad():
                     z = model_woddp.encode(images)
-                    vq_loss = model_woddp.last_vq_loss if model_woddp.last_vq_loss is not None else torch.zeros(1, device=device)
-                else:
-                    with torch.no_grad():
-                        z = model_woddp.encode(images)
-                    vq_loss = torch.zeros(1, device=device)
                 recon = model_woddp.decode(z)
                 recon_normed = recon * 2.0 - 1.0
                 rec_loss = F.l1_loss(recon, images)
@@ -431,7 +507,7 @@ def main():
                     lpips_loss = lpips(real_normed, recon_normed)
                 else:
                     lpips_loss = rec_loss.new_zeros(())
-                recon_total = rec_loss + perceptual_weight * lpips_loss + vq_loss
+                recon_total = rec_loss + perceptual_weight * lpips_loss
 
                 if use_gan:
                     fake_aug = disc_aug.aug(recon_normed)
@@ -510,8 +586,6 @@ def main():
             epoch_metrics["lpips"] += lpips_loss.detach()
             epoch_metrics["gan"] += gan_loss.detach()
             epoch_metrics["total"] += total_loss.detach()
-            if has_quantizer:
-                epoch_metrics["vq"] += vq_loss.detach()
             num_batches += 1
 
             if log_interval > 0 and global_step % log_interval == 0 and rank == 0:
@@ -523,8 +597,6 @@ def main():
                     "gan/weight": adaptive_weight.detach().item(),
                     "lr/generator": optimizer.param_groups[0]["lr"],
                 }
-                if has_quantizer:
-                    stats["loss/vq"] = vq_loss.detach().item()
                 if disc_metrics:
                     stats.update(
                         {
@@ -557,6 +629,8 @@ def main():
                 )
 
             global_step += 1
+            if global_step % steps_per_epoch == 0:
+                break
 
         if rank == 0 and num_batches > 0:
             avg_recon = (epoch_metrics["recon"] / num_batches).item()
@@ -569,9 +643,6 @@ def main():
                 "epoch/loss_lpips": avg_lpips,
                 "epoch/loss_gan": avg_gan,
             }
-            if has_quantizer:
-                avg_vq = (epoch_metrics["vq"] / num_batches).item()
-                epoch_stats["epoch/loss_vq"] = avg_vq
             logger.info(
                 f"[Epoch {epoch}] "
                 + ", ".join(f"{k}: {v:.4f}" for k, v in epoch_stats.items())

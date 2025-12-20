@@ -1,18 +1,32 @@
 stage_1:
-  target: stage1.RAE
+  target: stage1.VQRAE
   params:
+    # Encoder configuration
     encoder_cls: 'Dinov2withNorm'
     encoder_config_path: './models/dinov2-with-registers-base'
     encoder_input_size: 224
     encoder_params:
       dinov2_path: './models/dinov2-with-registers-base'
       normalize: true
+    # Decoder configuration
     decoder_config_path: 'configs/decoder/ViTXL'
-    noise_tau: 0.8 # training 0.8, at inference time always set to 0
+    decoder_patch_size: 16
+    
+    # Vector Quantization parameters
+    num_embeddings: 262144  # Codebook size - can be tuned (common values: 512, 1024, 8192, 16384)
+    commitment_cost: 0.25  # Weight for commitment loss
+    vq_decay: 0.99  # EMA decay for codebook updates
+    vq_epsilon: 1e-5
+    quantize_before_reshape: false
+    use_simvq: true  # Use SimVQ instead of standard VQ
+    freeze_encoder: true  # Stage-1: Freeze encoder
+    
+    # Training parameters
+    noise_tau: 0.  # Disable noise for VQ training
     reshape_to_2d: true
-    #normalization_stat_path: 'models/stats/dinov2/wReg_base/imagenet1k/stat.pt'
+    normalization_stat_path: null  # Will be computed during training
 
-
+# Training configuration
 training:
   epochs: 16
   ema_decay: 0.9978

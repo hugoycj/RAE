@@ -1,0 +1,26 @@
+stage_1:
+  target: stage1.VQRAE
+  params:
+    # Encoder configuration (same as RAE)
+    encoder_cls: 'Dinov2withNorm'
+    encoder_config_path: 'facebook/dinov2-with-registers-base'
+    encoder_input_size: 224
+    encoder_params: {'dinov2_path': 'facebook/dinov2-with-registers-base', 'normalize': True}
+    
+    # Decoder configuration (same as RAE)
+    decoder_config_path: 'configs/decoder/ViTXL'
+    pretrained_decoder_path: 'models/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
+    
+    # Vector Quantization specific parameters
+    num_embeddings: 8192  # Codebook size
+    commitment_cost: 0.25  # Weight for commitment loss
+    vq_decay: 0.99  # EMA decay for codebook updates
+    vq_epsilon: 1e-5  # Numerical stability constant
+    quantize_before_reshape: false  # Quantize after reshaping to 2D
+    use_simvq: false  # Use standard VQ (set true for SimVQ)
+    freeze_encoder: true  # Freeze encoder during inference
+    
+    # RAE parameters
+    noise_tau: 0.  # No noise for VQ (can be enabled if desired)
+    reshape_to_2d: true
+    normalization_stat_path: 'models/stats/dinov2/wReg_base/imagenet1k/stat.pt'
