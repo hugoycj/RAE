@@ -34,7 +34,7 @@ class FSQ(nn.Module):
     The codebook is implicitly defined by the Cartesian product of all level sets.
     
     For example, with levels=[8, 8, 8], we get 8^3 = 512 implicit codebook entries.
-    Each of the 3 dimensions is quantized to one of 8 levels: {-4, -3, -2, -1, 0, 1, 2, 3}.
+    Each of the 3 dimensions is quantized to one of 8 levels: {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5}.
     
     Args:
         levels (List[int]): Number of quantization levels per dimension.
@@ -77,9 +77,6 @@ class FSQ(nn.Module):
         # Precompute the implicit codebook for efficient lookups
         # This is the Cartesian product of all level sets
         self._build_codebook()
-        
-        print(f"Initialized FSQ with levels={levels}, "
-              f"dim={self.dim}, codebook_size={self.codebook_size}")
     
     def _build_codebook(self):
         """
