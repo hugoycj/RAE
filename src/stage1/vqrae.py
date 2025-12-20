@@ -24,13 +24,22 @@ class VQRAE(RAE):
     This enables discrete representations while maintaining the pretrained encoder
     and learned decoder from RAE.
     
+    Supports three quantization methods:
+    1. Standard VQ-VAE with EMA codebook updates
+    2. SimVQ with frozen codebook and learned projection
+    3. FSQ (Finite Scalar Quantization) with implicit codebook
+    
     Args:
-        num_embeddings (int): Size of the codebook for vector quantization.
+        num_embeddings (int): Size of the codebook for VQ/SimVQ (ignored for FSQ).
         commitment_cost (float): Weight for the commitment loss in VQ.
-        vq_decay (float): Decay rate for EMA updates in VQ.
-        vq_epsilon (float): Small constant for numerical stability in VQ.
+        vq_decay (float): Decay rate for EMA updates in standard VQ.
+        vq_epsilon (float): Small constant for numerical stability.
         quantize_before_reshape (bool): If True, quantize in (B, N, C) format before
             reshaping to 2D. If False, quantize after reshaping to (B, C, H, W).
+        use_simvq (bool): Use SimVQ instead of standard VQ.
+        use_fsq (bool): Use FSQ (Finite Scalar Quantization) instead of VQ/SimVQ.
+        fsq_levels (List[int]): FSQ quantization levels per dimension (e.g., [8, 8, 8]).
+            Required if use_fsq=True. Length must match latent dimension.
         **rae_kwargs: Additional arguments passed to RAE parent class.
     """
     
@@ -43,6 +52,8 @@ class VQRAE(RAE):
         vq_epsilon: float = 1e-5,
         quantize_before_reshape: bool = False,
         use_simvq: bool = False,  # Use SimVQ (set True for paper-compliant implementation)
+        use_fsq: bool = False,  # Use FSQ (Finite Scalar Quantization)
+        fsq_levels: Optional[list] = None,  # FSQ levels per dimension, e.g., [8, 8, 8]
         # RAE parameters (passed to parent)
         encoder_cls: str = 'SigLIP2wNorm',  # Paper uses SigLIP-L
         encoder_config_path: str = 'google/siglip-large-patch16-384',
@@ -72,10 +83,11 @@ class VQRAE(RAE):
             eps=eps,
         )
         
-        # Initialize vector quantizer (SimVQ or standard VQ)
+        # Initialize vector quantizer (FSQ, SimVQ, or standard VQ)
         self.num_embeddings = num_embeddings
         self.quantize_before_reshape = quantize_before_reshape
         self.use_simvq = use_simvq
+        self.use_fsq = use_fsq
         self.freeze_encoder = freeze_encoder
         
         # For tracking losses
@@ -83,7 +95,34 @@ class VQRAE(RAE):
         self.last_commit_loss = None
         self.last_codebook_loss = None
         
-        if use_simvq:
+        if use_fsq:
+            # Use FSQ (Finite Scalar Quantization)
+            from .fsq import FSQ
+            if fsq_levels is None:
+                # Default FSQ levels based on latent dimension
+                # Common configurations from the paper
+                fsq_levels = [8, 8, 8]  # 512 codes
+            
+            # Verify that FSQ dimension matches latent dimension
+            if len(fsq_levels) != self.latent_dim:
+                raise ValueError(
+                    f"FSQ levels dimension {len(fsq_levels)} does not match "
+                    f"latent dimension {self.latent_dim}. "
+                    f"Please specify fsq_levels with length {self.latent_dim}."
+                )
+            
+            self.quantizer = FSQ(
+                levels=fsq_levels,
+                eps=vq_epsilon,
+            )
+            # Calculate effective codebook size
+            effective_codebook_size = 1
+            for level in fsq_levels:
+                effective_codebook_size *= level
+            self.num_embeddings = effective_codebook_size
+            print(f"Initialized VQRAE with FSQ (levels: {fsq_levels}, "
+                  f"implicit codebook size: {effective_codebook_size}, dim: {self.latent_dim})")
+        elif use_simvq:
             from .simvq import SimVQ
             self.quantizer = SimVQ(
                 num_embeddings=num_embeddings,
@@ -116,8 +155,7 @@ class VQRAE(RAE):
         # Store last VQ loss for monitoring
         self.last_vq_loss = None
         self.last_continuous_features = None  # For Stage-2 distillation
-        
-        print(f"Initialized VQRAE with codebook size {num_embeddings}")
+
     
     def encode(self, x: torch.Tensor, return_indices: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
