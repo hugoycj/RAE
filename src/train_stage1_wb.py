@@ -498,7 +498,8 @@ def main():
                 # For RAE, we can use no_grad since encoder is frozen
                 if has_quantizer:
                     z = model_woddp.encode(images)
-                    vq_loss = model_woddp.last_vq_loss if model_woddp.last_vq_loss is not None else torch.zeros(1, device=device)
+                    # vq_loss = model_woddp.last_vq_loss if model_woddp.last_vq_loss is not None else torch.zeros(1, device=device)
+                    vq_loss = model_woddp.last_codebook_loss if model_woddp.last_codebook_loss is not None else torch.zeros(1, device=device)
                 else:
                     with torch.no_grad():
                         z = model_woddp.encode(images)

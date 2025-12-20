@@ -81,6 +81,7 @@ class VQRAE(RAE):
         # For tracking losses
         self.last_vq_loss = None
         self.last_commit_loss = None
+        self.last_codebook_loss = None
         
         if use_simvq:
             from .simvq import SimVQ
@@ -169,6 +170,11 @@ class VQRAE(RAE):
         # Store commitment loss if available (for SimVQ) - keep gradients
         if hasattr(self.quantizer, 'last_commit_loss'):
             self.last_commit_loss = self.quantizer.last_commit_loss
+        
+        if hasattr(self.quantizer, 'last_codebook_loss'):
+            self.last_codebook_loss = self.quantizer.last_codebook_loss
+        
+
         
         # Apply normalization if enabled
         if self.do_normalization:
