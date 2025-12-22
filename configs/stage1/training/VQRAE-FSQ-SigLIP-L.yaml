@@ -15,17 +15,22 @@ stage_1:
     
     # FSQ (Finite Scalar Quantization) parameters
     use_fsq: true  # Use FSQ instead of VQ/SimVQ
-    fsq_levels: [8, 8, 8]  # 8^3 = 512 implicit codebook entries
-    # Alternative FSQ configurations (comment/uncomment to try):
-    # fsq_levels: [8, 6, 5]  # 8*6*5 = 240 codes
-    # fsq_levels: [7, 5, 5, 5]  # 7*5*5*5 = 875 codes
-    # fsq_levels: [8, 5, 5, 5]  # 8*5*5*5 = 1000 codes
+    fsq_levels: [8, 8, 8]  # 8^3 = 512 implicit codebook entries (3D FSQ)
+    fsq_use_projection: true  # Use projection layer to map 768D latent -> 3D FSQ -> 768D
     
-    # Note: fsq_levels length must match encoder latent dimension
-    # For SigLIP-L with 1536-dim output, you would need to specify
-    # fsq_levels with 1536 values, which is impractical.
-    # Consider using a projection layer to reduce dimensionality first,
-    # or use this config with an encoder that has lower output dimension.
+    # Alternative FSQ configurations for 16384 codebook size:
+    # fsq_levels: [8, 8, 16, 16]  # 8*8*16*16 = 16384 codes (4D FSQ)
+    # fsq_levels: [8, 8, 8, 8, 4]  # 8*8*8*8*4 = 16384 codes (5D FSQ)
+    
+    # Other common FSQ configurations:
+    # fsq_levels: [8, 6, 5]  # 8*6*5 = 240 codes (3D FSQ)
+    # fsq_levels: [7, 5, 5, 5]  # 7*5*5*5 = 875 codes (4D FSQ)
+    # fsq_levels: [8, 5, 5, 5]  # 8*5*5*5 = 1000 codes (4D FSQ)
+    
+    # Note: With fsq_use_projection=true, the projection layer automatically
+    # maps between the encoder's latent dimension (e.g., 768 for SigLIP-L)
+    # and the FSQ dimension (e.g., 3 for [8,8,8]).
+    # Set fsq_use_projection=false only if fsq_levels length equals latent_dim.
     
     vq_epsilon: 1e-3  # Small epsilon for FSQ numerical stability
     quantize_before_reshape: false  # Quantize in 2D format

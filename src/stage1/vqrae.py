@@ -39,7 +39,11 @@ class VQRAE(RAE):
         use_simvq (bool): Use SimVQ instead of standard VQ.
         use_fsq (bool): Use FSQ (Finite Scalar Quantization) instead of VQ/SimVQ.
         fsq_levels (List[int]): FSQ quantization levels per dimension (e.g., [8, 8, 8]).
-            Required if use_fsq=True. Length must match latent dimension.
+            If use_fsq=True, this defines the quantization levels. The product determines
+            the effective codebook size.
+        fsq_use_projection (bool): If True (default), uses learned projection layers to
+            map between encoder latent dimension and FSQ dimension. This allows using
+            low-dimensional FSQ (e.g., 3-6 dims) with high-dimensional encoders (e.g., 768 dims).
         **rae_kwargs: Additional arguments passed to RAE parent class.
     """
     
@@ -54,6 +58,7 @@ class VQRAE(RAE):
         use_simvq: bool = False,  # Use SimVQ (set True for paper-compliant implementation)
         use_fsq: bool = False,  # Use FSQ (Finite Scalar Quantization)
         fsq_levels: Optional[list] = None,  # FSQ levels per dimension, e.g., [8, 8, 8]
+        fsq_use_projection: bool = True,  # Use projection layer to reduce dim for FSQ
         # RAE parameters (passed to parent)
         encoder_cls: str = 'SigLIP2wNorm',  # Paper uses SigLIP-L
         encoder_config_path: str = 'google/siglip-large-patch16-384',
@@ -88,12 +93,17 @@ class VQRAE(RAE):
         self.quantize_before_reshape = quantize_before_reshape
         self.use_simvq = use_simvq
         self.use_fsq = use_fsq
+        self.fsq_use_projection = fsq_use_projection
         self.freeze_encoder = freeze_encoder
         
         # For tracking losses
         self.last_vq_loss = None
         self.last_commit_loss = None
         self.last_codebook_loss = None
+        
+        # FSQ projection layer (if needed)
+        self.fsq_projection = None
+        self.fsq_unprojection = None
         
         if use_fsq:
             # Use FSQ (Finite Scalar Quantization)
@@ -103,13 +113,22 @@ class VQRAE(RAE):
                 # Common configurations from the paper
                 fsq_levels = [8, 8, 8]  # 512 codes
             
-            # Verify that FSQ dimension matches latent dimension
-            if len(fsq_levels) != self.latent_dim:
-                raise ValueError(
-                    f"FSQ levels dimension {len(fsq_levels)} does not match "
-                    f"latent dimension {self.latent_dim}. "
-                    f"Please specify fsq_levels with length {self.latent_dim}."
-                )
+            fsq_dim = len(fsq_levels)
+            
+            # If latent dimension doesn't match FSQ dimension, use projection
+            if fsq_dim != self.latent_dim:
+                if not fsq_use_projection:
+                    raise ValueError(
+                        f"FSQ levels dimension {fsq_dim} does not match "
+                        f"latent dimension {self.latent_dim}. "
+                        f"Either set fsq_use_projection=True to use a projection layer, "
+                        f"or specify fsq_levels with length {self.latent_dim}."
+                    )
+                
+                # Create projection layers to/from FSQ dimension
+                self.fsq_projection = nn.Linear(self.latent_dim, fsq_dim)
+                self.fsq_unprojection = nn.Linear(fsq_dim, self.latent_dim)
+                print(f"Using projection layer: {self.latent_dim} -> {fsq_dim} -> {self.latent_dim}")
             
             self.quantizer = FSQ(
                 levels=fsq_levels,
@@ -121,7 +140,7 @@ class VQRAE(RAE):
                 effective_codebook_size *= level
             self.num_embeddings = effective_codebook_size
             print(f"Initialized VQRAE with FSQ (levels: {fsq_levels}, "
-                  f"implicit codebook size: {effective_codebook_size}, dim: {self.latent_dim})")
+                  f"implicit codebook size: {effective_codebook_size}, dim: {fsq_dim})")
         elif use_simvq:
             from .simvq import SimVQ
             self.quantizer = SimVQ(
@@ -186,7 +205,14 @@ class VQRAE(RAE):
         # Quantize before or after reshaping based on configuration
         if self.quantize_before_reshape:
             # Quantize in (B, N, C) format
-            z_q, vq_loss, indices = self.quantizer(z)
+            if self.use_fsq and self.fsq_projection is not None:
+                # Project to FSQ dimension
+                z_proj = self.fsq_projection(z)
+                z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                # Project back to original dimension
+                z_q = self.fsq_unprojection(z_q_proj)
+            else:
+                z_q, vq_loss, indices = self.quantizer(z)
             
             # Then reshape to 2D if needed
             if self.reshape_to_2d:
@@ -201,7 +227,23 @@ class VQRAE(RAE):
                 z = z.transpose(1, 2).view(b, c, h, w)
             
             # Then quantize in (B, C, H, W) format
-            z_q, vq_loss, indices = self.quantizer(z)
+            if self.use_fsq and self.fsq_projection is not None:
+                # Need to handle 2D case
+                original_shape = z.shape
+                b, c, h, w = z.shape
+                # Reshape to (B, H, W, C) for projection
+                z_reshaped = z.permute(0, 2, 3, 1).contiguous()
+                z_proj = self.fsq_projection(z_reshaped)
+                # Reshape to (B, fsq_dim, H, W) for quantizer
+                z_proj = z_proj.permute(0, 3, 1, 2).contiguous()
+                z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                # Project back: (B, fsq_dim, H, W) -> (B, H, W, fsq_dim)
+                z_q_proj = z_q_proj.permute(0, 2, 3, 1).contiguous()
+                z_q_reshaped = self.fsq_unprojection(z_q_proj)
+                # Reshape back to (B, C, H, W)
+                z_q = z_q_reshaped.permute(0, 3, 1, 2).contiguous()
+            else:
+                z_q, vq_loss, indices = self.quantizer(z)
         
         # Store VQ loss for training (keep gradients for backprop)
         self.last_vq_loss = vq_loss
@@ -281,7 +323,14 @@ class VQRAE(RAE):
         
         # Quantize
         if self.quantize_before_reshape:
-            z_q, vq_loss, indices = self.quantizer(z)
+            if self.use_fsq and self.fsq_projection is not None:
+                # Project to FSQ dimension
+                z_proj = self.fsq_projection(z)
+                z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                # Project back to original dimension
+                z_q = self.fsq_unprojection(z_q_proj)
+            else:
+                z_q, vq_loss, indices = self.quantizer(z)
             if self.reshape_to_2d:
                 b, n, c = z_q.shape
                 h_lat = w_lat = int(n ** 0.5)
@@ -293,7 +342,23 @@ class VQRAE(RAE):
                 h_lat = w_lat = int(n ** 0.5)
                 assert h_lat * w_lat == n, f"Number of patches {n} must be a perfect square for 2D reshaping"
                 z = z.transpose(1, 2).view(b, c, h_lat, w_lat)
-            z_q, vq_loss, indices = self.quantizer(z)
+            
+            if self.use_fsq and self.fsq_projection is not None:
+                # Need to handle 2D case
+                b, c, h, w = z.shape
+                # Reshape to (B, H, W, C) for projection
+                z_reshaped = z.permute(0, 2, 3, 1).contiguous()
+                z_proj = self.fsq_projection(z_reshaped)
+                # Reshape to (B, fsq_dim, H, W) for quantizer
+                z_proj = z_proj.permute(0, 3, 1, 2).contiguous()
+                z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                # Project back: (B, fsq_dim, H, W) -> (B, H, W, fsq_dim)
+                z_q_proj = z_q_proj.permute(0, 2, 3, 1).contiguous()
+                z_q_reshaped = self.fsq_unprojection(z_q_proj)
+                # Reshape back to (B, C, H, W)
+                z_q = z_q_reshaped.permute(0, 3, 1, 2).contiguous()
+            else:
+                z_q, vq_loss, indices = self.quantizer(z)
         
         # Store commitment loss if available (for SimVQ) - keep gradients for training
         if hasattr(self.quantizer, 'last_commit_loss'):
