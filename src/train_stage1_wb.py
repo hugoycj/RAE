@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-num-samples", type=int, required=True, help="Total number of samples in the dataset (required for WebDataset steps calculation).")
     
     parser.add_argument("--results-dir", type=str, default="results", help="Directory to store training outputs.")
-    parser.add_argument("--image-size", type=int, default=256, help="Image resolution (assumes square images).")
+    parser.add_argument("--image-size", type=int, default=224, help="Image resolution (assumes square images).")
     parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="fp32")
     parser.add_argument("--global-seed", type=int, default=None, help="Override training.global_seed from the config.")    
     parser.add_argument("--ckpt", type=str, default=None, help="Optional checkpoint path to resume training.")
@@ -160,7 +160,7 @@ def prepare_dataloader(
     """
     Creates a WebDataset loader.
     """
-    first_crop_size = 384 if image_size == 256 else int(image_size * 1.5)
+    first_crop_size = 384 if image_size == 224 else int(image_size * 1.5)
     
     # 1. Resolve URLs
     # If data_path is a directory, glob for tar files
@@ -335,7 +335,7 @@ def main():
         model_string_name = model_target.split(".")[-1]
         precision_suffix = f"-{args.precision}" if args.precision == "bf16" else ""
         experiment_name = (
-            f"{experiment_index:03d}-{model_string_name}{precision_suffix}-w-vqloss"
+            f"{experiment_index:03d}-{model_string_name}{precision_suffix}"
         )
         experiment_dir = os.path.join(args.results_dir, experiment_name)
         checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -364,14 +364,13 @@ def main():
     # only train decoder (and quantizer if present)
     rae.encoder.requires_grad_(False)
     rae.decoder.requires_grad_(True)
-    if has_quantizer:
-        rae.quantizer.requires_grad_(True)
     ddp_model = DDP(rae, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
     decoder = ddp_model.module.decoder
     # Build optimizer for decoder + quantizer (if present)
     if has_quantizer:
         quantizer = ddp_model.module.quantizer
-        trainable_params = list(decoder.parameters()) + list(quantizer.parameters())
+        quantizer_trainable = [p for p in quantizer.parameters() if p.requires_grad]        
+        trainable_params = list(decoder.parameters()) + quantizer_trainable
         optimizer, optim_msg = build_optimizer(trainable_params, training_cfg)
     else:
         optimizer, optim_msg = build_optimizer(decoder.parameters(), training_cfg)
