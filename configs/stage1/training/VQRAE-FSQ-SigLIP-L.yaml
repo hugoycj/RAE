@@ -3,10 +3,10 @@ stage_1:
   params:
     # Encoder configuration - SigLIP-L (400M parameters)
     encoder_cls: 'SigLIP2wNorm'
-    encoder_config_path: 'google/siglip-large-patch16-384'  # SigLIP-L
+    encoder_config_path: './models/siglip-base-patch16-224'  # SigLIP-L
     encoder_input_size: 224  # Training resolution
     encoder_params: 
-      model_name: 'google/siglip-large-patch16-384'
+      model_name: './models/siglip-base-patch16-224'
       num_tokens: 196  # 14x14 patches for 224x224 input
     
     # Decoder configuration - Symmetric ViT (mirrors encoder)
@@ -15,7 +15,7 @@ stage_1:
     
     # FSQ (Finite Scalar Quantization) parameters
     use_fsq: true  # Use FSQ instead of VQ/SimVQ
-    fsq_levels: [8, 8, 8]  # 8^3 = 512 implicit codebook entries (3D FSQ)
+    fsq_levels: [8, 8, 16, 16]  # 16384 codes
     fsq_use_projection: true  # Use projection layer to map 768D latent -> 3D FSQ -> 768D
     
     # Alternative FSQ configurations for 16384 codebook size:
@@ -52,15 +52,15 @@ training:
   checkpoint_interval: 5000
   sample_interval: 0
   optimizer:
-    lr: 2.0e-4
+    lr: 2.0e-3
     betas: [0.9, 0.95]
     weight_decay: 0.0
   scheduler:
     type: cosine
     warmup_epochs: 1
     decay_end_epoch: 16
-    base_lr: 2.0e-4
-    final_lr: 2.0e-5
+    base_lr: 2.0e-3
+    final_lr: 2.0e-4
 
 gan:
   disc:
