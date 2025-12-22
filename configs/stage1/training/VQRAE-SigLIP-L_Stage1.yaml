@@ -3,10 +3,10 @@ stage_1:
   params:
     # Encoder configuration - SigLIP-L (400M parameters)
     encoder_cls: 'SigLIP2wNorm'
-    encoder_config_path: 'google/siglip-large-patch16-384'  # SigLIP-L
+    encoder_config_path: './models/siglip-base-patch16-224'  # SigLIP-L
     encoder_input_size: 224  # Training resolution
     encoder_params: 
-      model_name: 'google/siglip-large-patch16-384'
+      model_name: './models/siglip-base-patch16-224'
       num_tokens: 196  # 14x14 patches for 224x224 input
     
     # Decoder configuration - Symmetric ViT (mirrors encoder)
