@@ -33,6 +33,7 @@ class SimVQ(nn.Module):
         commitment_cost (float): Weight for the commitment loss term (beta).
         legacy (bool): If True, uses legacy loss formulation (for backwards compatibility).
         epsilon (float): Small constant for numerical stability.
+        use_l2_norm (bool): If True, use L2-normalized cosine similarity distance instead of Euclidean.
         sane_index_shape (bool): Parameter kept for API compatibility with reference implementation.
             Currently, indices are always reshaped to (batch, height, width) for VQRAE compatibility.
     """
@@ -44,6 +45,7 @@ class SimVQ(nn.Module):
         commitment_cost: float = 0.25,
         legacy: bool = True,
         epsilon: float = 1e-5,
+        use_l2_norm: bool = True,
         sane_index_shape: bool = False,
     ):
         super().__init__()
@@ -53,6 +55,7 @@ class SimVQ(nn.Module):
         self.commitment_cost = commitment_cost
         self.legacy = legacy
         self.epsilon = epsilon
+        self.use_l2_norm = use_l2_norm
         self.sane_index_shape = sane_index_shape
 
         # Frozen codebook - initialized with normal distribution
@@ -65,6 +68,9 @@ class SimVQ(nn.Module):
         # Learnable projection layer (the key component of SimVQ)
         # Using default bias=True to match reference implementation
         self.embedding_proj = nn.Linear(embedding_dim, embedding_dim, bias=True)
+
+        # Learnable temperature for L2-normalized cosine distance
+        self.l2_norm_scale = nn.Parameter(torch.tensor(10.0))
         
         # For tracking losses (used by training script - must keep gradients)
         self.last_commit_loss = None
@@ -100,14 +106,23 @@ class SimVQ(nn.Module):
         # Apply learned projection to frozen codebook
         quant_codebook = self.embedding_proj(self.embedding.weight)
 
-        # Compute Euclidean distances: (z - e)^2 = z^2 + e^2 - 2*z*e
-        # z_flattened: (batch*spatial, embedding_dim)
-        # quant_codebook: (num_embeddings, embedding_dim)
-        distances = (
-            torch.sum(z_flattened ** 2, dim=1, keepdim=True) +
-            torch.sum(quant_codebook ** 2, dim=1) -
-            2 * torch.matmul(z_flattened, quant_codebook.t())
-        )
+        # Compute distances based on distance metric
+        if self.use_l2_norm:
+            # L2-normalized cosine similarity distance
+            # Normalize both z and codebook to unit sphere
+            z_norm = F.normalize(z_flattened, p=2, dim=-1)
+            codebook_norm = F.normalize(quant_codebook, p=2, dim=-1)
+            # Negative cosine similarity (with learnable temperature)
+            distances = -torch.einsum('bd,nd->bn', z_norm, codebook_norm) * self.l2_norm_scale
+        else:
+            # Euclidean distance: (z - e)^2 = z^2 + e^2 - 2*z*e
+            # z_flattened: (batch*spatial, embedding_dim)
+            # quant_codebook: (num_embeddings, embedding_dim)
+            distances = (
+                torch.sum(z_flattened ** 2, dim=1, keepdim=True) +
+                torch.sum(quant_codebook ** 2, dim=1) -
+                2 * torch.matmul(z_flattened, quant_codebook.t())
+            )
         
         # Find nearest codebook entries
         encoding_indices = torch.argmin(distances, dim=1)
