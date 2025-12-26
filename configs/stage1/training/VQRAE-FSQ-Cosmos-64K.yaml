@@ -1,0 +1,86 @@
+stage_1:
+  target: stage1.VQRAE
+  params:
+    # Encoder configuration - SigLIP-L (400M parameters)
+    encoder_cls: 'SigLIP2wNorm'
+    encoder_config_path: './models/siglip-base-patch16-224'  # SigLIP-L
+    encoder_input_size: 224  # Training resolution
+    encoder_params: 
+      model_name: './models/siglip-base-patch16-224'
+      num_tokens: 196  # 14x14 patches for 224x224 input
+    
+    # Decoder configuration - Symmetric ViT (mirrors encoder)
+    decoder_config_path: 'configs/decoder/ViTXL'  # Same depth as SigLIP-L (24 layers)
+    decoder_patch_size: 16
+    
+    # FSQ (Finite Scalar Quantization) parameters - Cosmos-Tokenizer style
+    use_fsq: true  # Use FSQ instead of VQ/SimVQ
+    fsq_levels: [8, 8, 8, 5, 5, 5]  # 64000 codes (~64K) following Cosmos-Tokenizer
+    fsq_use_projection: true  # Use projection layer to map 768D latent -> 6D FSQ -> 768D
+    
+    # Post-quantization convolution (Cosmos-Tokenizer approach)
+    # Following cosmos-tokenizer: indices -> codes -> post_quant_conv -> decoder
+    use_post_quant_conv: true  # Enable post-quantization convolution
+    post_quant_conv_kernel_size: 1  # 1x1 convolution for channel processing
+    
+    vq_epsilon: 1e-3  # Small epsilon for FSQ numerical stability
+    quantize_before_reshape: false  # Quantize in 2D format
+    freeze_encoder: true  # Stage-1: Freeze encoder
+    
+    # RAE parameters
+    noise_tau: 0.0  # No noise injection for VQRAE
+    reshape_to_2d: true
+    normalization_stat_path: null  # Computed during training
+
+# Training configuration
+training:
+  epochs: 16
+  ema_decay: 0.9978
+  batch_size: 32 # per-proc bs
+  num_workers: 8
+  clip_grad: 0.0
+  log_interval: 100
+  checkpoint_interval: 5000
+  sample_interval: 0
+  optimizer:
+    lr: 2.0e-3
+    betas: [0.9, 0.95]
+    weight_decay: 0.0
+  scheduler:
+    type: cosine
+    warmup_epochs: 1
+    decay_end_epoch: 16
+    base_lr: 2.0e-3
+    final_lr: 2.0e-4
+
+gan:
+  disc:
+    arch:
+      dino_ckpt_path: 'models/discs/dino_vit_small_patch8_224.pth'
+      ks: 9
+      norm_type: 'bn'
+      using_spec_norm: true
+      recipe: 'S_8'
+    optimizer:
+      lr: 2.0e-4
+      betas: [0.9, 0.95]
+      weight_decay: 0.0
+    scheduler:
+      type: cosine
+      warmup_epochs: 1
+      decay_end_epoch: 16
+      base_lr: 2.0e-4
+      final_lr: 2.0e-5
+    augment:
+      prob: 1.0
+      cutout: 0.0
+  loss:
+    disc_loss: hinge
+    gen_loss: vanilla
+    disc_weight: 0.75
+    perceptual_weight: 1.0
+    disc_start: 8
+    disc_upd_start: 6
+    lpips_start: 0
+    max_d_weight: 10000.0
+    disc_updates: 1

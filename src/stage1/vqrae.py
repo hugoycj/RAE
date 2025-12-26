@@ -59,6 +59,8 @@ class VQRAE(RAE):
         use_fsq: bool = False,  # Use FSQ (Finite Scalar Quantization)
         fsq_levels: Optional[list] = None,  # FSQ levels per dimension, e.g., [8, 8, 8]
         fsq_use_projection: bool = True,  # Use projection layer to reduce dim for FSQ
+        use_post_quant_conv: bool = False,  # Use post-quantization convolution (Cosmos-Tokenizer style)
+        post_quant_conv_kernel_size: int = 1,  # Kernel size for post_quant_conv (1 for 1x1 conv)
         # RAE parameters (passed to parent)
         encoder_cls: str = 'SigLIP2wNorm',  # Paper uses SigLIP-L
         encoder_config_path: str = 'google/siglip-large-patch16-384',
@@ -95,6 +97,7 @@ class VQRAE(RAE):
         self.use_fsq = use_fsq
         self.fsq_use_projection = fsq_use_projection
         self.freeze_encoder = freeze_encoder
+        self.use_post_quant_conv = use_post_quant_conv
         
         # For tracking losses
         self.last_vq_loss = None
@@ -104,6 +107,9 @@ class VQRAE(RAE):
         # FSQ projection layer (if needed)
         self.fsq_projection = None
         self.fsq_unprojection = None
+        
+        # Post-quantization convolution layer (Cosmos-Tokenizer style)
+        self.post_quant_conv = None
         
         if use_fsq:
             # Use FSQ (Finite Scalar Quantization)
@@ -160,6 +166,21 @@ class VQRAE(RAE):
                 epsilon=vq_epsilon,
             )
             print(f"Initialized VQRAE with standard VQ (codebook size: {num_embeddings})")
+        
+        # Initialize post-quantization convolution if requested (Cosmos-Tokenizer style)
+        if use_post_quant_conv:
+            # For FSQ with projection, we work in latent_dim space after unprojection
+            # For other quantizers or FSQ without projection, we work directly in latent_dim
+            padding = post_quant_conv_kernel_size // 2
+            self.post_quant_conv = nn.Conv2d(
+                self.latent_dim,
+                self.latent_dim,
+                kernel_size=post_quant_conv_kernel_size,
+                stride=1,
+                padding=padding
+            )
+            print(f"Initialized post_quant_conv: {self.latent_dim} -> {self.latent_dim} "
+                  f"(kernel_size={post_quant_conv_kernel_size})")
         
         # Freeze/unfreeze encoder based on training stage
         if freeze_encoder:
@@ -254,7 +275,16 @@ class VQRAE(RAE):
         if hasattr(self.quantizer, 'last_codebook_loss'):
             self.last_codebook_loss = self.quantizer.last_codebook_loss
         
-
+        # Apply post-quantization convolution if enabled (Cosmos-Tokenizer style)
+        # This processes the quantized codes before they go into normalization/decoder
+        if self.use_post_quant_conv and self.post_quant_conv is not None:
+            # Ensure z_q is in (B, C, H, W) format for Conv2d
+            if len(z_q.shape) == 3:
+                # Convert (B, N, C) to (B, C, H, W)
+                b, n, c = z_q.shape
+                h = w = int(n ** 0.5)
+                z_q = z_q.transpose(1, 2).view(b, c, h, w)
+            z_q = self.post_quant_conv(z_q)
         
         # Apply normalization if enabled
         if self.do_normalization:
@@ -364,6 +394,16 @@ class VQRAE(RAE):
         if hasattr(self.quantizer, 'last_commit_loss'):
             self.last_commit_loss = self.quantizer.last_commit_loss
         
+        # Apply post-quantization convolution if enabled (Cosmos-Tokenizer style)
+        if self.use_post_quant_conv and self.post_quant_conv is not None:
+            # Ensure z_q is in (B, C, H, W) format for Conv2d
+            if len(z_q.shape) == 3:
+                # Convert (B, N, C) to (B, C, H, W)
+                b, n, c = z_q.shape
+                h = w = int(n ** 0.5)
+                z_q = z_q.transpose(1, 2).view(b, c, h, w)
+            z_q = self.post_quant_conv(z_q)
+        
         # Apply normalization
         if self.do_normalization:
             latent_mean = self.latent_mean.to(z_q.device) if self.latent_mean is not None else 0
@@ -405,6 +445,12 @@ class VQRAE(RAE):
         """
         Decode from codebook indices to image.
         
+        Following Cosmos-Tokenizer approach:
+        1. Convert indices to codes (codebook lookup)
+        2. Apply post_quant_conv if enabled
+        3. Apply normalization if enabled
+        4. Decode to image
+        
         Args:
             indices: Codebook indices
             spatial_shape: Optional (height, width) of latent spatial dimensions.
@@ -413,7 +459,7 @@ class VQRAE(RAE):
         Returns:
             x_rec: Reconstructed image
         """
-        # Get embeddings from indices
+        # Step 1: Convert indices to codes (codebook lookup)
         z_q = self.quantizer.get_codebook_entry(indices)
         
         # Reshape to expected format
@@ -429,13 +475,23 @@ class VQRAE(RAE):
             # z_q is in (B, H, W, C) format, need to convert to (B, C, H, W)
             z_q = z_q.permute(0, 3, 1, 2).contiguous()
         
-        # Apply normalization if enabled
+        # Step 2: Apply post-quantization convolution if enabled (Cosmos-Tokenizer style)
+        if self.use_post_quant_conv and self.post_quant_conv is not None:
+            # Ensure z_q is in (B, C, H, W) format for Conv2d
+            if len(z_q.shape) == 3:
+                # Convert (B, N, C) to (B, C, H, W)
+                b, n, c = z_q.shape
+                h = w = int(n ** 0.5)
+                z_q = z_q.transpose(1, 2).view(b, c, h, w)
+            z_q = self.post_quant_conv(z_q)
+        
+        # Step 3: Apply normalization if enabled
         if self.do_normalization:
             latent_mean = self.latent_mean.to(z_q.device) if self.latent_mean is not None else 0
             latent_var = self.latent_var.to(z_q.device) if self.latent_var is not None else 1
             z_q = (z_q - latent_mean) / torch.sqrt(latent_var + self.eps)
         
-        # Decode
+        # Step 4: Decode to image
         return self.decode(z_q)
     
     def compute_distillation_loss(self, continuous_features: torch.Tensor, quantized_features: torch.Tensor) -> torch.Tensor:
