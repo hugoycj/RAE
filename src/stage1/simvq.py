@@ -33,7 +33,8 @@ class SimVQ(nn.Module):
         commitment_cost (float): Weight for the commitment loss term (beta).
         legacy (bool): If True, uses legacy loss formulation (for backwards compatibility).
         epsilon (float): Small constant for numerical stability.
-        sane_index_shape (bool): If True, reshape indices to (batch, height, width) format.
+        sane_index_shape (bool): Parameter kept for API compatibility with reference implementation.
+            Currently, indices are always reshaped to (batch, height, width) for VQRAE compatibility.
     """
     
     def __init__(
@@ -62,7 +63,8 @@ class SimVQ(nn.Module):
             p.requires_grad = False
         
         # Learnable projection layer (the key component of SimVQ)
-        self.embedding_proj = nn.Linear(embedding_dim, embedding_dim)
+        # Using default bias=True to match reference implementation
+        self.embedding_proj = nn.Linear(embedding_dim, embedding_dim, bias=True)
         
         # For tracking losses (used by training script - must keep gradients)
         self.last_commit_loss = None
@@ -149,14 +151,16 @@ class SimVQ(nn.Module):
         
         Args:
             indices: Codebook indices of shape (batch, height, width) or (batch, num_tokens)
-            shape: Optional shape specifying (batch, height, width, channel).
-                   For compatibility with reference implementation.
-                   If not provided, output shape is inferred from indices.
+            shape: Optional shape for compatibility with reference implementation.
+                   Expected format: (batch, height, width, channel) where channel is last dimension.
+                   If provided, output will be reshaped to (batch, channel, height, width).
+                   If not provided, output shape is inferred from indices shape.
         
         Returns:
-            z_q: Quantized latent vectors. If indices are 2D (batch, height, width),
-                 returns (batch, height, width, channel). If indices are 2D (batch, num_tokens),
-                 returns (batch, num_tokens, channel).
+            z_q: Quantized latent vectors. 
+                 - If shape is provided: returns (batch, channel, height, width)
+                 - If shape is None and indices are 3D: returns (batch, height, width, channel)
+                 - If shape is None and indices are 2D: returns (batch, num_tokens, channel)
         """
         # Apply projection to frozen codebook
         quant_codebook = self.embedding_proj(self.embedding.weight)
@@ -166,10 +170,12 @@ class SimVQ(nn.Module):
         
         # If shape is provided (reference implementation compatibility)
         if shape is not None:
+            # Validate shape has 4 dimensions as expected
+            if len(shape) != 4:
+                raise ValueError(f"Shape must have 4 dimensions (batch, height, width, channel), got {len(shape)}")
             # Reshape to (batch, height, width, channel)
             z_q = z_q.view(shape)
-            # Convert to (batch, channel, height, width) if needed
-            if len(shape) == 4:
-                z_q = z_q.permute(0, 3, 1, 2).contiguous()
+            # Convert to (batch, channel, height, width) - channel moves from last to second position
+            z_q = z_q.permute(0, 3, 1, 2).contiguous()
         
         return z_q
