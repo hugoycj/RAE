@@ -59,6 +59,8 @@ class VQRAE(RAE):
         use_fsq: bool = False,  # Use FSQ (Finite Scalar Quantization)
         fsq_levels: Optional[list] = None,  # FSQ levels per dimension, e.g., [8, 8, 8]
         fsq_use_projection: bool = True,  # Use projection layer to reduce dim for FSQ
+        use_post_quant_conv: bool = False,  # Use post-quantization convolution (Cosmos-Tokenizer style)
+        post_quant_conv_kernel_size: int = 1,  # Kernel size for post_quant_conv (1 for 1x1 conv)
         # RAE parameters (passed to parent)
         encoder_cls: str = 'SigLIP2wNorm',  # Paper uses SigLIP-L
         encoder_config_path: str = 'google/siglip-large-patch16-384',
@@ -95,6 +97,7 @@ class VQRAE(RAE):
         self.use_fsq = use_fsq
         self.fsq_use_projection = fsq_use_projection
         self.freeze_encoder = freeze_encoder
+        self.use_post_quant_conv = use_post_quant_conv
         
         # For tracking losses
         self.last_vq_loss = None
@@ -104,6 +107,9 @@ class VQRAE(RAE):
         # FSQ projection layer (if needed)
         self.fsq_projection = None
         self.fsq_unprojection = None
+        
+        # Post-quantization convolution layer (Cosmos-Tokenizer style)
+        self.post_quant_conv = None
         
         if use_fsq:
             # Use FSQ (Finite Scalar Quantization)
@@ -158,6 +164,36 @@ class VQRAE(RAE):
             )
             print(f"Initialized VQRAE with standard VQ (codebook size: {num_embeddings})")
         
+        # Initialize post-quantization convolution if requested (Cosmos-Tokenizer style)
+        if use_post_quant_conv:
+            # Following Cosmos-Tokenizer: post_quant_conv operates on FSQ codes (before unprojection)
+            # For FSQ with projection, we work in fsq_dim space before unprojection
+            # For other quantizers or FSQ without projection, we work directly in latent_dim
+            padding = post_quant_conv_kernel_size // 2
+            if use_fsq and self.fsq_projection is not None:
+                # post_quant_conv processes FSQ codes before unprojection to latent_dim
+                conv_dim = len(fsq_levels)
+                self.post_quant_conv = nn.Conv2d(
+                    conv_dim,
+                    conv_dim,
+                    kernel_size=post_quant_conv_kernel_size,
+                    stride=1,
+                    padding=padding
+                )
+                print(f"Initialized post_quant_conv in FSQ space: {conv_dim} -> {conv_dim} "
+                      f"(kernel_size={post_quant_conv_kernel_size}, before unprojection to {self.latent_dim})")
+            else:
+                # Standard case: work in latent_dim space
+                self.post_quant_conv = nn.Conv2d(
+                    self.latent_dim,
+                    self.latent_dim,
+                    kernel_size=post_quant_conv_kernel_size,
+                    stride=1,
+                    padding=padding
+                )
+                print(f"Initialized post_quant_conv: {self.latent_dim} -> {self.latent_dim} "
+                      f"(kernel_size={post_quant_conv_kernel_size})")
+        
         # Freeze/unfreeze encoder based on training stage
         if freeze_encoder:
             for param in self.encoder.parameters():
@@ -206,10 +242,31 @@ class VQRAE(RAE):
                 # Project to FSQ dimension
                 z_proj = self.fsq_projection(z)
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                
+                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # Reshape to 2D for conv: (B, N, fsq_dim) -> (B, fsq_dim, H, W)
+                    b, n, fsq_dim = z_q_proj.shape
+                    h = w = int(n ** 0.5)
+                    z_q_proj = z_q_proj.transpose(1, 2).view(b, fsq_dim, h, w)
+                    z_q_proj = self.post_quant_conv(z_q_proj)
+                    # Reshape back: (B, fsq_dim, H, W) -> (B, N, fsq_dim)
+                    z_q_proj = z_q_proj.view(b, fsq_dim, n).transpose(1, 2).contiguous()
+                
                 # Project back to original dimension
                 z_q = self.fsq_unprojection(z_q_proj)
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
+                
+                # Apply post_quant_conv if not using FSQ projection
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # Reshape to 2D for conv: (B, N, C) -> (B, C, H, W)
+                    b, n, c = z_q.shape
+                    h = w = int(n ** 0.5)
+                    z_q = z_q.transpose(1, 2).view(b, c, h, w)
+                    z_q = self.post_quant_conv(z_q)
+                    # Reshape back: (B, C, H, W) -> (B, N, C)
+                    z_q = z_q.view(b, c, n).transpose(1, 2).contiguous()
             
             # Then reshape to 2D if needed
             if self.reshape_to_2d:
@@ -234,6 +291,12 @@ class VQRAE(RAE):
                 # Reshape to (B, fsq_dim, H, W) for quantizer
                 z_proj = z_proj.permute(0, 3, 1, 2).contiguous()
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                
+                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # z_q_proj is already in (B, fsq_dim, H, W) format
+                    z_q_proj = self.post_quant_conv(z_q_proj)
+                
                 # Project back: (B, fsq_dim, H, W) -> (B, H, W, fsq_dim)
                 z_q_proj = z_q_proj.permute(0, 2, 3, 1).contiguous()
                 z_q_reshaped = self.fsq_unprojection(z_q_proj)
@@ -241,6 +304,11 @@ class VQRAE(RAE):
                 z_q = z_q_reshaped.permute(0, 3, 1, 2).contiguous()
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
+                
+                # Apply post_quant_conv if not using FSQ projection
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # z_q is already in (B, C, H, W) format
+                    z_q = self.post_quant_conv(z_q)
         
         # Store VQ loss for training (keep gradients for backprop)
         self.last_vq_loss = vq_loss
@@ -250,8 +318,6 @@ class VQRAE(RAE):
         
         if hasattr(self.quantizer, 'last_codebook_loss'):
             self.last_codebook_loss = self.quantizer.last_codebook_loss
-        
-
         
         # Apply normalization if enabled
         if self.do_normalization:
@@ -324,10 +390,32 @@ class VQRAE(RAE):
                 # Project to FSQ dimension
                 z_proj = self.fsq_projection(z)
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                
+                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # Reshape to 2D for conv: (B, N, fsq_dim) -> (B, fsq_dim, H, W)
+                    b, n, fsq_dim = z_q_proj.shape
+                    h = w = int(n ** 0.5)
+                    z_q_proj = z_q_proj.transpose(1, 2).view(b, fsq_dim, h, w)
+                    z_q_proj = self.post_quant_conv(z_q_proj)
+                    # Reshape back: (B, fsq_dim, H, W) -> (B, N, fsq_dim)
+                    z_q_proj = z_q_proj.view(b, fsq_dim, n).transpose(1, 2).contiguous()
+                
                 # Project back to original dimension
                 z_q = self.fsq_unprojection(z_q_proj)
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
+                
+                # Apply post_quant_conv if not using FSQ projection
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # Reshape to 2D for conv: (B, N, C) -> (B, C, H, W)
+                    b, n, c = z_q.shape
+                    h = w = int(n ** 0.5)
+                    z_q = z_q.transpose(1, 2).view(b, c, h, w)
+                    z_q = self.post_quant_conv(z_q)
+                    # Reshape back: (B, C, H, W) -> (B, N, C)
+                    z_q = z_q.view(b, c, n).transpose(1, 2).contiguous()
+            
             if self.reshape_to_2d:
                 b, n, c = z_q.shape
                 h_lat = w_lat = int(n ** 0.5)
@@ -349,6 +437,12 @@ class VQRAE(RAE):
                 # Reshape to (B, fsq_dim, H, W) for quantizer
                 z_proj = z_proj.permute(0, 3, 1, 2).contiguous()
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
+                
+                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # z_q_proj is already in (B, fsq_dim, H, W) format
+                    z_q_proj = self.post_quant_conv(z_q_proj)
+                
                 # Project back: (B, fsq_dim, H, W) -> (B, H, W, fsq_dim)
                 z_q_proj = z_q_proj.permute(0, 2, 3, 1).contiguous()
                 z_q_reshaped = self.fsq_unprojection(z_q_proj)
@@ -356,6 +450,11 @@ class VQRAE(RAE):
                 z_q = z_q_reshaped.permute(0, 3, 1, 2).contiguous()
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
+                
+                # Apply post_quant_conv if not using FSQ projection
+                if self.use_post_quant_conv and self.post_quant_conv is not None:
+                    # z_q is already in (B, C, H, W) format
+                    z_q = self.post_quant_conv(z_q)
         
         # Store commitment loss if available (for SimVQ) - keep gradients for training
         if hasattr(self.quantizer, 'last_commit_loss'):
@@ -402,6 +501,13 @@ class VQRAE(RAE):
         """
         Decode from codebook indices to image.
         
+        Following Cosmos-Tokenizer approach:
+        1. Convert indices to codes (codebook lookup) - returns FSQ codes
+        2. Apply post_quant_conv on FSQ codes (before unprojection)
+        3. Unproject FSQ codes to latent dimension (if using projection)
+        4. Apply normalization if enabled
+        5. Decode to image
+        
         Args:
             indices: Codebook indices
             spatial_shape: Optional (height, width) of latent spatial dimensions.
@@ -410,12 +516,28 @@ class VQRAE(RAE):
         Returns:
             x_rec: Reconstructed image
         """
-        # Get embeddings from indices
-        z_q = self.quantizer.get_codebook_entry(indices)
+        # Step 1: Convert indices to codes (codebook lookup)
+        # This returns codes in FSQ space: (B, H, W, fsq_dim)
+        z_q_fsq = self.quantizer.get_codebook_entry(indices)
         
-        # Reshape to expected format
+        # Step 2: Apply post_quant_conv on FSQ codes BEFORE unprojection (Cosmos-Tokenizer style)
+        if self.use_post_quant_conv and self.post_quant_conv is not None:
+            # Convert to (B, fsq_dim, H, W) for Conv2d
+            z_q_fsq = z_q_fsq.permute(0, 3, 1, 2).contiguous()
+            z_q_fsq = self.post_quant_conv(z_q_fsq)
+            # Convert back to (B, H, W, fsq_dim)
+            z_q_fsq = z_q_fsq.permute(0, 2, 3, 1).contiguous()
+        
+        # Step 3: Unproject from FSQ space to latent space if needed
+        if self.use_fsq and self.fsq_projection is not None:
+            # Unproject: (B, H, W, fsq_dim) -> (B, H, W, latent_dim)
+            z_q = self.fsq_unprojection(z_q_fsq)
+        else:
+            z_q = z_q_fsq
+        
+        # Step 4: Reshape to expected format for decoder
         if self.quantize_before_reshape:
-            # z_q is in (B, H, W, C) format from get_codebook_entry
+            # z_q is in (B, H, W, C) format
             # Need to convert to (B, N, C) then potentially to (B, C, H, W)
             b, h, w, c = z_q.shape
             z_q = z_q.view(b, h * w, c)
@@ -426,13 +548,13 @@ class VQRAE(RAE):
             # z_q is in (B, H, W, C) format, need to convert to (B, C, H, W)
             z_q = z_q.permute(0, 3, 1, 2).contiguous()
         
-        # Apply normalization if enabled
+        # Step 5: Apply normalization if enabled
         if self.do_normalization:
             latent_mean = self.latent_mean.to(z_q.device) if self.latent_mean is not None else 0
             latent_var = self.latent_var.to(z_q.device) if self.latent_var is not None else 1
             z_q = (z_q - latent_mean) / torch.sqrt(latent_var + self.eps)
         
-        # Decode
+        # Step 6: Decode to image
         return self.decode(z_q)
     
     def compute_distillation_loss(self, continuous_features: torch.Tensor, quantized_features: torch.Tensor) -> torch.Tensor:
