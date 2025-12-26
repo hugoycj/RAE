@@ -11,6 +11,9 @@ FSQ replaces the learned codebook in VQ-VAE with a simple quantization scheme
 where each dimension is independently quantized to a fixed set of levels.
 This eliminates codebook collapse and achieves implicit 100% codebook utilization.
 
+The indices_to_codes and codes_to_indices methods follow the Cosmos-Tokenizer
+implementation approach, using mathematical decomposition instead of lookup tables.
+
 Key advantages:
 - No codebook learning required
 - No codebook collapse
@@ -18,6 +21,7 @@ Key advantages:
 - Fast training and inference
 
 Reference: https://arxiv.org/pdf/2309.15505
+Cosmos-Tokenizer: https://github.com/NVIDIA/Cosmos-Tokenizer
 """
 
 import torch
@@ -84,14 +88,31 @@ class FSQ(nn.Module):
         
         For levels=[L1, L2, ..., Ld], this creates all possible combinations of
         quantized values across dimensions.
+        
+        Following Cosmos-Tokenizer approach, we also precompute basis for efficient
+        index <-> code conversion.
         """
+        # Precompute basis for index calculation (Cosmos-Tokenizer style)
+        # basis[i] is the product of all levels[j] for j > i
+        basis = []
+        for i in range(len(self.levels)):
+            basis_value = 1
+            for j in range(i + 1, len(self.levels)):
+                basis_value *= self.levels[j]
+            basis.append(basis_value)
+        self.register_buffer('_basis', torch.tensor(basis, dtype=torch.int32))
+        
+        # Also store levels as tensor for efficient computation
+        self.register_buffer('_levels', torch.tensor(self.levels, dtype=torch.int32))
+        
+        # For backward compatibility, keep the old basis name
+        self.register_buffer('basis', torch.tensor(basis, dtype=torch.long))
+        
+        # Build full codebook for backward compatibility with get_codebook_entry
         # Create quantization levels for each dimension
         # For L levels, use values: -(L-1)/2, ..., -1/2, 1/2, ..., (L-1)/2
-        # This centers the levels around 0
         all_levels = []
         for L in self.levels:
-            # Generate levels from -(L-1) to (L-1) by steps of 2
-            # Then divide by 2 to get -(L-1)/2 to (L-1)/2
             level_values = torch.arange(L, dtype=torch.float32) - (L - 1) / 2
             all_levels.append(level_values)
         
@@ -103,16 +124,6 @@ class FSQ(nn.Module):
         
         # Register as buffer so it moves with the model
         self.register_buffer('codebook', codebook)
-        
-        # Precompute basis for index calculation
-        # basis[i] is the product of all levels[j] for j > i
-        basis = []
-        for i in range(len(self.levels)):
-            basis_value = 1
-            for j in range(i + 1, len(self.levels)):
-                basis_value *= self.levels[j]
-            basis.append(basis_value)
-        self.register_buffer('basis', torch.tensor(basis, dtype=torch.long))
     
     def _quantize(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -235,26 +246,95 @@ class FSQ(nn.Module):
         
         return entries
     
+    def _scale_and_shift(self, codes_normalized: torch.Tensor) -> torch.Tensor:
+        """
+        Scale and shift normalized codes from [-(L-1)/2, (L-1)/2] to [0, L-1].
+        
+        Following Cosmos-Tokenizer implementation.
+        
+        Args:
+            codes_normalized: Codes in normalized range [-(L-1)/2, (L-1)/2]
+        
+        Returns:
+            Codes shifted to [0, L-1] range
+        """
+        half_width = self._levels // 2
+        return codes_normalized + half_width
+    
+    def _scale_and_shift_inverse(self, codes: torch.Tensor) -> torch.Tensor:
+        """
+        Inverse of _scale_and_shift: convert from [0, L-1] to [-(L-1)/2, (L-1)/2].
+        
+        Following Cosmos-Tokenizer implementation.
+        
+        Args:
+            codes: Codes in [0, L-1] range
+        
+        Returns:
+            Codes in normalized range [-(L-1)/2, (L-1)/2]
+        """
+        half_width = self._levels // 2
+        return codes - half_width
+    
     def codes_to_indices(self, codes: torch.Tensor) -> torch.Tensor:
         """
         Convert quantized codes to indices.
         
+        Following Cosmos-Tokenizer implementation.
+        
         Args:
-            codes: Quantized codes of shape (..., dim)
+            codes: Quantized codes of shape (..., dim) in range [-(L-1)/2, (L-1)/2]
         
         Returns:
-            indices: Codebook indices of shape (...)
+            indices: Codebook indices of shape (...) in range [0, codebook_size-1]
         """
-        return self._compute_indices(codes)
+        assert codes.shape[-1] == self.dim, f"Expected {self.dim} dimensions, got {codes.shape[-1]}"
+        
+        # Scale and shift from [-(L-1)/2, (L-1)/2] to [0, L-1]
+        codes_shifted = self._scale_and_shift(codes).float()
+        
+        # Compute flat index: sum of (code_i * basis_i) for each dimension
+        indices = (codes_shifted * self._basis.float()).sum(dim=-1).to(torch.int32)
+        
+        return indices.long()
     
     def indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
         """
         Convert indices to quantized codes.
         
+        Following Cosmos-Tokenizer implementation: decomposes scalar indices into 
+        per-dimension codes using basis and modulo operations.
+        
         Args:
-            indices: Codebook indices
+            indices: Codebook indices of shape (B, H, W) or (B, N) in range [0, codebook_size-1]
         
         Returns:
-            codes: Quantized codes
+            codes: Quantized codes of shape (B, H, W, dim) or (B, N, dim) in range [-(L-1)/2, (L-1)/2]
         """
-        return self.get_codebook_entry(indices)
+        # Store original shape for later
+        original_shape = indices.shape
+        
+        # Flatten to (..., 1) for broadcasting
+        indices_flat = indices.reshape(-1, 1)
+        
+        # Decompose indices into per-dimension codes: (indices // basis) % levels
+        # This gives codes in [0, L-1] range for each dimension
+        codes_non_centered = (indices_flat // self._basis) % self._levels
+        
+        # Convert from [0, L-1] to [-(L-1)/2, (L-1)/2] (normalized range)
+        codes = self._scale_and_shift_inverse(codes_non_centered.float())
+        
+        # Reshape to match input
+        if len(original_shape) == 3:
+            # (B, H, W) case
+            B, H, W = original_shape
+            codes = codes.view(B, H, W, self.dim)
+        elif len(original_shape) == 2:
+            # (B, N) case
+            B, N = original_shape
+            codes = codes.view(B, N, self.dim)
+        else:
+            # General case
+            codes = codes.view(*original_shape, self.dim)
+        
+        return codes
