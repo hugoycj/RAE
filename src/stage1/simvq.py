@@ -147,23 +147,28 @@ class SimVQ(nn.Module):
         Get quantized latent vectors from codebook indices.
         
         Args:
-            indices: Codebook indices, can be flattened or shaped
+            indices: Codebook indices of shape (batch, height, width) or (batch, num_tokens)
             shape: Optional shape specifying (batch, height, width, channel).
-                   If provided, output will be reshaped and permuted to (batch, channel, height, width).
+                   For compatibility with reference implementation.
+                   If not provided, output shape is inferred from indices.
         
         Returns:
-            z_q: Quantized latent vectors from the codebook
+            z_q: Quantized latent vectors. If indices are 2D (batch, height, width),
+                 returns (batch, height, width, channel). If indices are 2D (batch, num_tokens),
+                 returns (batch, num_tokens, channel).
         """
         # Apply projection to frozen codebook
         quant_codebook = self.embedding_proj(self.embedding.weight)
         
         # Get quantized vectors from projected codebook
-        z_q = F.embedding(indices.view(-1), quant_codebook)
+        z_q = F.embedding(indices, quant_codebook)
         
+        # If shape is provided (reference implementation compatibility)
         if shape is not None:
             # Reshape to (batch, height, width, channel)
             z_q = z_q.view(shape)
-            # Convert to (batch, channel, height, width)
-            z_q = z_q.permute(0, 3, 1, 2).contiguous()
+            # Convert to (batch, channel, height, width) if needed
+            if len(shape) == 4:
+                z_q = z_q.permute(0, 3, 1, 2).contiguous()
         
         return z_q
