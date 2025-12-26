@@ -99,10 +99,12 @@ class SimVQ(nn.Module):
         quant_codebook = self.embedding_proj(self.embedding.weight)
 
         # Compute Euclidean distances: (z - e)^2 = z^2 + e^2 - 2*z*e
+        # z_flattened: (batch*spatial, embedding_dim)
+        # quant_codebook: (num_embeddings, embedding_dim)
         distances = (
             torch.sum(z_flattened ** 2, dim=1, keepdim=True) +
             torch.sum(quant_codebook ** 2, dim=1) -
-            2 * torch.einsum('bd,dn->bn', z_flattened, quant_codebook.t())
+            2 * torch.matmul(z_flattened, quant_codebook.t())
         )
         
         # Find nearest codebook entries
@@ -133,10 +135,9 @@ class SimVQ(nn.Module):
         # Reshape back to original format
         if is_2d_input:
             quantized = quantized.permute(0, 3, 1, 2).contiguous()
-            if self.sane_index_shape:
-                encoding_indices = encoding_indices.view(input_shape[0], input_shape[2], input_shape[3])
-            else:
-                encoding_indices = encoding_indices.view(input_shape[0], input_shape[2], input_shape[3])
+            # Always reshape indices for 2D inputs for VQRAE compatibility
+            # The sane_index_shape parameter is kept for reference implementation compatibility
+            encoding_indices = encoding_indices.view(input_shape[0], input_shape[2], input_shape[3])
         else:
             encoding_indices = encoding_indices.view(input_shape[0], input_shape[1])
         
