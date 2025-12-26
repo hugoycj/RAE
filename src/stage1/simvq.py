@@ -69,8 +69,11 @@ class SimVQ(nn.Module):
         # Using default bias=True to match reference implementation
         self.embedding_proj = nn.Linear(embedding_dim, embedding_dim, bias=True)
 
-        # Learnable temperature for L2-normalized cosine distance
-        self.l2_norm_scale = nn.Parameter(torch.tensor(10.0))
+        # Learnable temperature for L2-normalized cosine distance (only if using L2 norm)
+        if use_l2_norm:
+            self.l2_norm_scale = nn.Parameter(torch.tensor(10.0))
+        else:
+            self.l2_norm_scale = None
         
         # For tracking losses (used by training script - must keep gradients)
         self.last_commit_loss = None
@@ -113,7 +116,8 @@ class SimVQ(nn.Module):
             z_norm = F.normalize(z_flattened, p=2, dim=-1)
             codebook_norm = F.normalize(quant_codebook, p=2, dim=-1)
             # Negative cosine similarity (with learnable temperature)
-            distances = -torch.einsum('bd,nd->bn', z_norm, codebook_norm) * self.l2_norm_scale
+            # Using @ operator for better performance
+            distances = -(z_norm @ codebook_norm.t()) * self.l2_norm_scale
         else:
             # Euclidean distance: (z - e)^2 = z^2 + e^2 - 2*z*e
             # z_flattened: (batch*spatial, embedding_dim)
