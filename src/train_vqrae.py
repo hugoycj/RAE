@@ -409,9 +409,9 @@ def main():
                 
                 # Get VQ/commitment loss if available (for VQRAE)
                 commit_loss = torch.zeros_like(rec_loss)
-                if hasattr(model_woddp, 'last_commit_loss') and model_woddp.last_commit_loss is not None:
-                    commit_loss = model_woddp.last_commit_loss
-                elif hasattr(model_woddp, 'last_vq_loss') and model_woddp.last_vq_loss is not None:
+                # if hasattr(model_woddp, 'last_commit_loss') and model_woddp.last_commit_loss is not None:
+                #     commit_loss = model_woddp.last_commit_loss
+                if hasattr(model_woddp, 'last_vq_loss') and model_woddp.last_vq_loss is not None:
                     # Fallback to vq_loss if commit_loss not available
                     commit_loss = model_woddp.last_vq_loss
                 

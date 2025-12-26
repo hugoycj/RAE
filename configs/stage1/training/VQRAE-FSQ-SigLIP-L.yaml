@@ -15,7 +15,7 @@ stage_1:
     
     # FSQ (Finite Scalar Quantization) parameters
     use_fsq: true  # Use FSQ instead of VQ/SimVQ
-    fsq_levels: [8, 8, 16, 16]  # 16384 codes
+    fsq_levels: [8, 8, 8, 8, 4]  # 16384 codes
     fsq_use_projection: true  # Use projection layer to map 768D latent -> 3D FSQ -> 768D
     
     # Alternative FSQ configurations for 16384 codebook size:
@@ -34,7 +34,7 @@ stage_1:
     
     vq_epsilon: 1e-3  # Small epsilon for FSQ numerical stability
     quantize_before_reshape: false  # Quantize in 2D format
-    freeze_encoder: true  # Stage-1: Freeze encoder
+    freeze_encoder: false  # Stage-1: Freeze encoder
     
     # RAE parameters
     noise_tau: 0.0  # No noise injection for VQRAE

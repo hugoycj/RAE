@@ -107,11 +107,7 @@ class VQRAE(RAE):
         
         if use_fsq:
             # Use FSQ (Finite Scalar Quantization)
-            from .fsq import FSQ
-            if fsq_levels is None:
-                # Default FSQ levels based on latent dimension
-                # Common configurations from the paper
-                fsq_levels = [8, 8, 8]  # 512 codes
+            from .fsq import FSQ, AttnFSQProjector, FourierFSQUnprojector, FSQAdapter
             
             fsq_dim = len(fsq_levels)
             
@@ -126,8 +122,9 @@ class VQRAE(RAE):
                     )
                 
                 # Create projection layers to/from FSQ dimension
-                self.fsq_projection = nn.Linear(self.latent_dim, fsq_dim)
-                self.fsq_unprojection = nn.Linear(fsq_dim, self.latent_dim)
+                # self.fsq_projection = AttnFSQProjector(self.latent_dim, fsq_dim)
+                self.fsq_projection = FSQAdapter(self.latent_dim, fsq_dim)
+                self.fsq_unprojection = FourierFSQUnprojector(fsq_dim, self.latent_dim)
                 print(f"Using projection layer: {self.latent_dim} -> {fsq_dim} -> {self.latent_dim}")
             
             self.quantizer = FSQ(
