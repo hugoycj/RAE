@@ -245,31 +245,10 @@ class VQRAE(RAE):
                 # Project to FSQ dimension
                 z_proj = self.fsq_projection(z)
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
-                
-                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # Reshape to 2D for conv: (B, N, fsq_dim) -> (B, fsq_dim, H, W)
-                    b, n, fsq_dim = z_q_proj.shape
-                    h = w = int(n ** 0.5)
-                    z_q_proj = z_q_proj.transpose(1, 2).view(b, fsq_dim, h, w)
-                    z_q_proj = self.post_quant_conv(z_q_proj)
-                    # Reshape back: (B, fsq_dim, H, W) -> (B, N, fsq_dim)
-                    z_q_proj = z_q_proj.view(b, fsq_dim, n).transpose(1, 2).contiguous()
-                
                 # Project back to original dimension
                 z_q = self.fsq_unprojection(z_q_proj)
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
-                
-                # Apply post_quant_conv if not using FSQ projection
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # Reshape to 2D for conv: (B, N, C) -> (B, C, H, W)
-                    b, n, c = z_q.shape
-                    h = w = int(n ** 0.5)
-                    z_q = z_q.transpose(1, 2).view(b, c, h, w)
-                    z_q = self.post_quant_conv(z_q)
-                    # Reshape back: (B, C, H, W) -> (B, N, C)
-                    z_q = z_q.view(b, c, n).transpose(1, 2).contiguous()
             
             # Then reshape to 2D if needed
             if self.reshape_to_2d:
@@ -294,12 +273,6 @@ class VQRAE(RAE):
                 # Reshape to (B, fsq_dim, H, W) for quantizer
                 z_proj = z_proj.permute(0, 3, 1, 2).contiguous()
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
-                
-                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # z_q_proj is already in (B, fsq_dim, H, W) format
-                    z_q_proj = self.post_quant_conv(z_q_proj)
-                
                 # Project back: (B, fsq_dim, H, W) -> (B, H, W, fsq_dim)
                 z_q_proj = z_q_proj.permute(0, 2, 3, 1).contiguous()
                 z_q_reshaped = self.fsq_unprojection(z_q_proj)
@@ -307,11 +280,6 @@ class VQRAE(RAE):
                 z_q = z_q_reshaped.permute(0, 3, 1, 2).contiguous()
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
-                
-                # Apply post_quant_conv if not using FSQ projection
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # z_q is already in (B, C, H, W) format
-                    z_q = self.post_quant_conv(z_q)
         
         # Store VQ loss for training (keep gradients for backprop)
         self.last_vq_loss = vq_loss
@@ -393,31 +361,10 @@ class VQRAE(RAE):
                 # Project to FSQ dimension
                 z_proj = self.fsq_projection(z)
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
-                
-                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # Reshape to 2D for conv: (B, N, fsq_dim) -> (B, fsq_dim, H, W)
-                    b, n, fsq_dim = z_q_proj.shape
-                    h = w = int(n ** 0.5)
-                    z_q_proj = z_q_proj.transpose(1, 2).view(b, fsq_dim, h, w)
-                    z_q_proj = self.post_quant_conv(z_q_proj)
-                    # Reshape back: (B, fsq_dim, H, W) -> (B, N, fsq_dim)
-                    z_q_proj = z_q_proj.view(b, fsq_dim, n).transpose(1, 2).contiguous()
-                
                 # Project back to original dimension
                 z_q = self.fsq_unprojection(z_q_proj)
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
-                
-                # Apply post_quant_conv if not using FSQ projection
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # Reshape to 2D for conv: (B, N, C) -> (B, C, H, W)
-                    b, n, c = z_q.shape
-                    h = w = int(n ** 0.5)
-                    z_q = z_q.transpose(1, 2).view(b, c, h, w)
-                    z_q = self.post_quant_conv(z_q)
-                    # Reshape back: (B, C, H, W) -> (B, N, C)
-                    z_q = z_q.view(b, c, n).transpose(1, 2).contiguous()
             
             if self.reshape_to_2d:
                 b, n, c = z_q.shape
@@ -440,12 +387,6 @@ class VQRAE(RAE):
                 # Reshape to (B, fsq_dim, H, W) for quantizer
                 z_proj = z_proj.permute(0, 3, 1, 2).contiguous()
                 z_q_proj, vq_loss, indices = self.quantizer(z_proj)
-                
-                # Apply post_quant_conv in FSQ space BEFORE unprojection (Cosmos-Tokenizer style)
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # z_q_proj is already in (B, fsq_dim, H, W) format
-                    z_q_proj = self.post_quant_conv(z_q_proj)
-                
                 # Project back: (B, fsq_dim, H, W) -> (B, H, W, fsq_dim)
                 z_q_proj = z_q_proj.permute(0, 2, 3, 1).contiguous()
                 z_q_reshaped = self.fsq_unprojection(z_q_proj)
@@ -453,11 +394,6 @@ class VQRAE(RAE):
                 z_q = z_q_reshaped.permute(0, 3, 1, 2).contiguous()
             else:
                 z_q, vq_loss, indices = self.quantizer(z)
-                
-                # Apply post_quant_conv if not using FSQ projection
-                if self.use_post_quant_conv and self.post_quant_conv is not None:
-                    # z_q is already in (B, C, H, W) format
-                    z_q = self.post_quant_conv(z_q)
         
         # Store commitment loss if available (for SimVQ) - keep gradients for training
         if hasattr(self.quantizer, 'last_commit_loss'):
