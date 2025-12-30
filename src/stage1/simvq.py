@@ -148,25 +148,42 @@ class SimVQ(nn.Module):
                 2 * torch.matmul(z_projected, quant_codebook.t())
             )
         # ----------------------------------------------------
-        
+
         encoding_indices = torch.argmin(distances, dim=1)
         quantized = F.embedding(encoding_indices, quant_codebook).view(z.shape)
-        
-        commitment_loss = torch.mean((quantized.detach() - z) ** 2)
-        codebook_loss = torch.mean((quantized - z.detach()) ** 2)
-        
+        z_projected = z_projected.view(z.shape)
+
+        # Compute losses and apply STE
+        # When using L2 norm mode, both loss and STE should use normalized features for consistency
+        if self.use_l2_norm:
+            # Get normalized versions
+            z_norm_reshaped = z_norm.view(z.shape)
+            quantized_norm = F.normalize(quantized.view(-1, self.embedding_dim), p=2, dim=-1).view(z.shape)
+
+            # Loss on normalized features (consistent with cosine distance)
+            commitment_loss = torch.mean((quantized_norm.detach() - z_norm_reshaped) ** 2)
+            codebook_loss = torch.mean((quantized_norm - z_norm_reshaped.detach()) ** 2)
+
+            # STE on normalized features (consistent with loss)
+            quantized = z_norm_reshaped + (quantized_norm - z_norm_reshaped).detach()
+        else:
+            # Non-normalized mode: loss and STE both use projected features
+            commitment_loss = torch.mean((quantized.detach() - z_projected) ** 2)
+            codebook_loss = torch.mean((quantized - z_projected.detach()) ** 2)
+
+            # STE on projected features
+            quantized = z_projected + (quantized - z_projected).detach()
+
         self.last_commit_loss = commitment_loss
         self.last_codebook_loss = codebook_loss
         self.last_commit_loss_detached = commitment_loss.detach()
         self.last_codebook_loss_detached = codebook_loss.detach()
-        
+
         if not self.legacy:
             vq_loss = self.commitment_cost * commitment_loss + codebook_loss
         else:
             vq_loss = commitment_loss + self.commitment_cost * codebook_loss
-        
-        quantized = z + (quantized - z).detach()
-        
+
         if is_2d_input:
             quantized = quantized.permute(0, 3, 1, 2).contiguous()
             encoding_indices = encoding_indices.view(input_shape[0], input_shape[2], input_shape[3])
