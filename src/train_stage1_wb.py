@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-num-samples", type=int, required=True, help="Total number of samples in the dataset (required for WebDataset steps calculation).")
     
     parser.add_argument("--results-dir", type=str, default="results", help="Directory to store training outputs.")
-    parser.add_argument("--image-size", type=int, default=256, help="Image resolution (assumes square images).")
+    parser.add_argument("--image-size", type=int, default=384, help="Image resolution (assumes square images).")
     parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="fp32")
     parser.add_argument("--global-seed", type=int, default=None, help="Override training.global_seed from the config.")    
     parser.add_argument("--ckpt", type=str, default=None, help="Optional checkpoint path to resume training.")
@@ -160,7 +160,7 @@ def prepare_dataloader(
     """
     Creates a WebDataset loader.
     """
-    first_crop_size = 384 if image_size == 256 else int(image_size * 1.5)
+    first_crop_size = 384 if image_size == 384 else int(image_size * 1.5)
     
     # 1. Resolve URLs
     # If data_path is a directory, glob for tar files
@@ -352,28 +352,44 @@ def main():
         logger = create_logger(None)
     
     rae: RAE = instantiate_from_config(rae_config).to(device)
-    rae.encoder.eval()
-    rae.decoder.train()
+
+    # Check freeze_encoder config setting
+    freeze_encoder = rae_config.get("params", {}).get("freeze_encoder", True)
+
     # Check if model has a quantizer (VQRAE) and set it to train mode
     has_quantizer = hasattr(rae, 'quantizer') and rae.quantizer is not None
+
+    # Set encoder mode based on freeze_encoder config
+    if freeze_encoder:
+        rae.encoder.eval()
+        rae.encoder.requires_grad_(False)
+    else:
+        rae.encoder.train()
+        rae.encoder.requires_grad_(True)
+
+    rae.decoder.train()
     if has_quantizer:
         rae.quantizer.train()
 
     ema_model = deepcopy(rae).to(device).eval()
     ema_model.requires_grad_(False)
-    # only train decoder (and quantizer if present)
-    rae.encoder.requires_grad_(False)
+
+    # Set trainable parameters based on freeze_encoder
     rae.decoder.requires_grad_(True)
     ddp_model = DDP(rae, device_ids=[device.index], broadcast_buffers=False, find_unused_parameters=False)  # type: ignore[arg-type]
     decoder = ddp_model.module.decoder
-    # Build optimizer for decoder + quantizer (if present)
+    encoder = ddp_model.module.encoder
+
+    # Build optimizer for decoder + quantizer + encoder (if not frozen)
+    trainable_params = list(decoder.parameters())
     if has_quantizer:
         quantizer = ddp_model.module.quantizer
-        quantizer_trainable = [p for p in quantizer.parameters() if p.requires_grad]        
-        trainable_params = list(decoder.parameters()) + quantizer_trainable
-        optimizer, optim_msg = build_optimizer(trainable_params, training_cfg)
-    else:
-        optimizer, optim_msg = build_optimizer(decoder.parameters(), training_cfg)
+        quantizer_trainable = [p for p in quantizer.parameters() if p.requires_grad]
+        trainable_params = trainable_params + quantizer_trainable
+    if not freeze_encoder:
+        encoder_trainable = [p for p in encoder.parameters() if p.requires_grad]
+        trainable_params = trainable_params + encoder_trainable
+    optimizer, optim_msg = build_optimizer(trainable_params, training_cfg)
     model_woddp = ddp_model.module
     discriminator, disc_aug = build_discriminator(disc_cfg, device)
     disc_params = [p for p in discriminator.parameters() if p.requires_grad]
@@ -441,6 +457,11 @@ def main():
     if rank == 0:
         num_params = sum(p.numel() for p in ddp_model.parameters() if p.requires_grad)
         logger.info(f"Stage-1 RAE trainable parameters: {num_params/1e6:.2f}M")
+        if not freeze_encoder:
+            num_encoder_params = sum(p.numel() for p in ddp_model.module.encoder.parameters() if p.requires_grad)
+            logger.info(f"Encoder trainable parameters: {num_encoder_params/1e6:.2f}M (unfrozen)")
+        else:
+            logger.info("Encoder is frozen")
         if has_quantizer:
             num_quant_params = sum(p.numel() for p in ddp_model.module.quantizer.parameters() if p.requires_grad)
             logger.info(f"Quantizer trainable parameters: {num_quant_params/1e6:.2f}M")
@@ -494,10 +515,10 @@ def main():
 
             with autocast(**autocast_kwargs):
                 # For VQRAE, we need gradients through encode for the quantizer
-                # For RAE, we can use no_grad since encoder is frozen
-                if has_quantizer:
+                # For RAE with frozen encoder, we can use no_grad
+                # For unfrozen encoder, we need gradients for encoder training
+                if has_quantizer or not freeze_encoder:
                     z = model_woddp.encode(images)
-                    # vq_loss = model_woddp.last_vq_loss if model_woddp.last_vq_loss is not None else torch.zeros(1, device=device)
                     vq_loss = model_woddp.last_codebook_loss if model_woddp.last_codebook_loss is not None else torch.zeros(1, device=device)
                 else:
                     with torch.no_grad():

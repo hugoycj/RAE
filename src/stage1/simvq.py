@@ -22,17 +22,24 @@ from typing import Tuple
 class SimVQ(nn.Module):
     """
     SimVQ: Vector Quantization with frozen codebook and learnable projection.
-    
+
     Key idea: Instead of learning the codebook directly, SimVQ keeps the codebook
     frozen and learns a single linear projection layer. This simple modification
     achieves 100% codebook utilization and prevents representation collapse.
-    
+
+    Extended with z_proj: An additional learnable projection matrix W ∈ R^(e×e)
+    for projecting input semantic features ZI to ˆZc before quantization:
+        Zq = lookup argmin_i || ˆZc − c_i * w_i ||
+
     Args:
         num_embeddings (int): Size of the codebook (number of discrete codes).
         embedding_dim (int): Dimensionality of each embedding vector.
         commitment_cost (float): Weight for the commitment loss term (beta).
         legacy (bool): If True, uses legacy loss formulation (for backwards compatibility).
         epsilon (float): Small constant for numerical stability.
+        use_l2_norm (bool): If True, uses L2-normalized cosine similarity for distances.
+        use_z_proj (bool): If True, applies a learnable projection to input features
+            before computing distances with the codebook.
     """
     
     def __init__(
@@ -43,15 +50,17 @@ class SimVQ(nn.Module):
         legacy: bool = True,
         epsilon: float = 1e-5,
         use_l2_norm: bool = True,
+        use_z_proj: bool = True,
     ):
         super().__init__()
-        
+
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
         self.legacy = legacy
         self.epsilon = epsilon
         self.use_l2_norm = use_l2_norm
+        self.use_z_proj = use_z_proj
 
         # Frozen codebook
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
@@ -59,9 +68,20 @@ class SimVQ(nn.Module):
         # Freeze the codebook
         for p in self.embedding.parameters():
             p.requires_grad = False
-        
-        # Learnable projection layer (the key component of SimVQ)
+
+        # Learnable projection layer for codebook (the key component of SimVQ)
         self.embedding_proj = nn.Linear(embedding_dim, embedding_dim, bias=True)
+
+        # Learnable projection layer for input features (z_proj)
+        # Projects semantic features ZI to ˆZc before quantization
+        # Zq = lookup argmin_i || ˆZc − c_i * w_i ||
+        if use_z_proj:
+            self.z_proj = nn.Linear(embedding_dim, embedding_dim, bias=True)
+            # Initialize close to identity for stable training start
+            nn.init.eye_(self.z_proj.weight)
+            nn.init.zeros_(self.z_proj.bias)
+        else:
+            self.z_proj = None
 
         # <<< NEW: learnable temperature for cosine distance
         self.l2_norm_scale = nn.Parameter(torch.tensor(10.0))
@@ -97,25 +117,35 @@ class SimVQ(nn.Module):
             z = z.permute(0, 2, 3, 1).contiguous()
         
         z_flattened = z.view(-1, self.embedding_dim)
+
+        # Project input features if z_proj is enabled
+        # ˆZc = z * W_z (learnable projection for input features)
+        if self.z_proj is not None:
+            z_projected = self.z_proj(z_flattened)
+        else:
+            z_projected = z_flattened
+
+        # Project codebook embeddings
         quant_codebook = self.embedding_proj(self.embedding.weight)
 
         # ----------------------------------------------------
-        # MINIMAL MODIFICATION: insert L2-normalized branch
+        # Compute distances between projected inputs and codebook
+        # Zq = lookup argmin_i || ˆZc − c_i * w_i ||
         # ----------------------------------------------------
         if self.use_l2_norm:
-            # L2 normalize both z and codebook to unit sphere
-            z_norm = F.normalize(z_flattened, p=2, dim=-1)
+            # L2 normalize both projected z and codebook to unit sphere
+            z_norm = F.normalize(z_projected, p=2, dim=-1)
             codebook_norm = F.normalize(quant_codebook, p=2, dim=-1)
 
             # Negative cosine similarity distance
             distances = -torch.einsum('bd,nd->bn', z_norm, codebook_norm) * self.l2_norm_scale
 
         else:
-            # Original Euclidean distance
+            # Original Euclidean distance with projected features
             distances = (
-                torch.sum(z_flattened ** 2, dim=1, keepdim=True) +
+                torch.sum(z_projected ** 2, dim=1, keepdim=True) +
                 torch.sum(quant_codebook ** 2, dim=1) -
-                2 * torch.matmul(z_flattened, quant_codebook.t())
+                2 * torch.matmul(z_projected, quant_codebook.t())
             )
         # ----------------------------------------------------
         
