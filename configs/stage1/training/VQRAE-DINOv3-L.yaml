@@ -1,40 +1,37 @@
 stage_1:
   target: stage1.VQRAE
   params:
-    # Encoder configuration - SigLIP-L (400M parameters)
-    encoder_cls: 'SigLIP2wNorm'
-    encoder_config_path: './models/siglip-base-patch16-224'  # SigLIP-L
-    encoder_input_size: 224  # Training resolution
-    encoder_params: 
-      model_name: './models/siglip-base-patch16-224'
-      num_tokens: 196  # 14x14 patches for 224x224 input
-    
-    # Decoder configuration - Symmetric ViT (mirrors encoder)
-    decoder_config_path: 'configs/decoder/ViTXL'  # Same depth as SigLIP-L (24 layers)
+    # Encoder configuration - DINOv3-L (ViT-Large/16)
+    encoder_cls: 'Dinov3withNorm'
+    encoder_config_path: './models/dinov3-vitl16-pretrain-lvd1689m'
+    encoder_input_size: 512  # Standard DINOv3 resolution
+    encoder_params:
+      dinov3_path: './models/dinov3-vitl16-pretrain-lvd1689m'
+      normalize: true
+
+    # Decoder configuration - ViT-XL to match encoder capacity
+    decoder_config_path: 'configs/decoder/ViTXL'
     decoder_patch_size: 16
-    
+
     # Vector Quantization parameters (SimVQ)
-    num_embeddings: 16384  # 16k codebook size (100% utilization)
-    commitment_cost: 0.25  # Standard commitment weight
-    vq_decay: 0.99  # EMA decay (if using EMA updates)
+    num_embeddings: 64000  # 16k codebook size
+    commitment_cost: 0.25
+    vq_decay: 0.99
     vq_epsilon: 1e-5
-    quantize_before_reshape: false  # Quantize in 2D format
-    use_simvq: true  # Use SimVQ instead of standard VQ
-    freeze_encoder: false  # Stage-1: Freeze encoder
-    
-    # Codebook dimension matches encoder output (1536 for SigLIP-L)
-    # This is automatically set based on encoder.hidden_size
-    
+    quantize_before_reshape: false
+    use_simvq: true
+    freeze_encoder: false
+
     # RAE parameters
-    noise_tau: 0.0  # No noise injection for VQRAE
+    noise_tau: 0.0
     reshape_to_2d: true
-    normalization_stat_path: null  # Computed during training
+    normalization_stat_path: null
 
 # Training configuration
 training:
   epochs: 16
   ema_decay: 0.9978
-  batch_size: 32 # per-proc bs
+  batch_size: 4
   num_workers: 8
   clip_grad: 0.0
   log_interval: 100

@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-num-samples", type=int, required=True, help="Total number of samples in the dataset (required for WebDataset steps calculation).")
     
     parser.add_argument("--results-dir", type=str, default="results", help="Directory to store training outputs.")
-    parser.add_argument("--image-size", type=int, default=384, help="Image resolution (assumes square images).")
+    parser.add_argument("--image-size", type=int, default=512, help="Image resolution (assumes square images).")
     parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="fp32")
     parser.add_argument("--global-seed", type=int, default=None, help="Override training.global_seed from the config.")    
     parser.add_argument("--ckpt", type=str, default=None, help="Optional checkpoint path to resume training.")
@@ -160,7 +160,7 @@ def prepare_dataloader(
     """
     Creates a WebDataset loader.
     """
-    first_crop_size = 384 if image_size == 384 else int(image_size * 1.5)
+    first_crop_size = int(image_size * 1.5)
     
     # 1. Resolve URLs
     # If data_path is a directory, glob for tar files
@@ -519,7 +519,8 @@ def main():
                 # For unfrozen encoder, we need gradients for encoder training
                 if has_quantizer or not freeze_encoder:
                     z = model_woddp.encode(images)
-                    vq_loss = model_woddp.last_codebook_loss if model_woddp.last_codebook_loss is not None else torch.zeros(1, device=device)
+                    # Use last_vq_loss which is the properly weighted combination of commitment and codebook losses
+                    vq_loss = model_woddp.last_vq_loss if model_woddp.last_vq_loss is not None else torch.zeros(1, device=device)
                 else:
                     with torch.no_grad():
                         z = model_woddp.encode(images)

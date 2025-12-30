@@ -3,36 +3,22 @@ stage_1:
   params:
     # Encoder configuration - SigLIP-L (400M parameters)
     encoder_cls: 'SigLIP2wNorm'
-    encoder_config_path: './models/siglip-base-patch16-224'  # SigLIP-L
-    encoder_input_size: 224  # Training resolution
+    encoder_config_path: './models/siglip2-large-patch16-256'  # SigLIP-L
+    encoder_input_size: 256  # Training resolution
     encoder_params: 
-      model_name: './models/siglip-base-patch16-224'
+      model_name: './models/siglip2-large-patch16-256'
     
     # Decoder configuration - Symmetric ViT (mirrors encoder)
     decoder_config_path: 'configs/decoder/ViTXL'  # Same depth as SigLIP-L (24 layers)
     decoder_patch_size: 16
     
-    # FSQ (Finite Scalar Quantization) parameters
-    use_fsq: true  # Use FSQ instead of VQ/SimVQ
-    fsq_levels: [8, 8, 8, 8, 4]  # 16384 codes
-    fsq_use_projection: true  # Use projection layer to map 768D latent -> 3D FSQ -> 768D
-    
-    # Alternative FSQ configurations for 16384 codebook size:
-    # fsq_levels: [8, 8, 16, 16]  # 8*8*16*16 = 16384 codes (4D FSQ)
-    # fsq_levels: [8, 8, 8, 8, 4]  # 8*8*8*8*4 = 16384 codes (5D FSQ)
-    
-    # Other common FSQ configurations:
-    # fsq_levels: [8, 6, 5]  # 8*6*5 = 240 codes (3D FSQ)
-    # fsq_levels: [7, 5, 5, 5]  # 7*5*5*5 = 875 codes (4D FSQ)
-    # fsq_levels: [8, 5, 5, 5]  # 8*5*5*5 = 1000 codes (4D FSQ)
-    
-    # Note: With fsq_use_projection=true, the projection layer automatically
-    # maps between the encoder's latent dimension (e.g., 768 for SigLIP-L)
-    # and the FSQ dimension (e.g., 3 for [8,8,8]).
-    # Set fsq_use_projection=false only if fsq_levels length equals latent_dim.
-    
-    vq_epsilon: 1e-3  # Small epsilon for FSQ numerical stability
+    # Vector Quantization parameters (SimVQ)
+    num_embeddings: 16384  # 16k codebook size (100% utilization)
+    commitment_cost: 0.25  # Standard commitment weight
+    vq_decay: 0.99  # EMA decay (if using EMA updates)
+    vq_epsilon: 1e-5
     quantize_before_reshape: false  # Quantize in 2D format
+    use_simvq: true  # Use SimVQ instead of standard VQ
     freeze_encoder: false  # Stage-1: Freeze encoder
     
     # RAE parameters
@@ -42,7 +28,7 @@ stage_1:
 
 # Training configuration
 training:
-  epochs: 16
+  epochs: 160
   ema_decay: 0.9978
   batch_size: 32 # per-proc bs
   num_workers: 8
@@ -51,15 +37,15 @@ training:
   checkpoint_interval: 5000
   sample_interval: 0
   optimizer:
-    lr: 2.0e-3
+    lr: 4.0e-4
     betas: [0.9, 0.95]
     weight_decay: 0.0
   scheduler:
     type: cosine
     warmup_epochs: 1
     decay_end_epoch: 16
-    base_lr: 2.0e-3
-    final_lr: 2.0e-4
+    base_lr: 4.0e-4
+    final_lr: 1.0e-4
 
 gan:
   disc:
@@ -70,15 +56,15 @@ gan:
       using_spec_norm: true
       recipe: 'S_8'
     optimizer:
-      lr: 2.0e-4
+      lr: 4.0e-4
       betas: [0.9, 0.95]
       weight_decay: 0.0
     scheduler:
       type: cosine
       warmup_epochs: 1
       decay_end_epoch: 16
-      base_lr: 2.0e-4
-      final_lr: 2.0e-5
+      base_lr: 4.0e-4
+      final_lr: 1.0e-4
     augment:
       prob: 1.0
       cutout: 0.0
